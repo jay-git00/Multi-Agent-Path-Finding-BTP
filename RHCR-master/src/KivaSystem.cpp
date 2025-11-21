@@ -3,7 +3,8 @@
 #include "ECBS.h"
 #include "LRAStar.h"
 #include "PBS.h"
-
+#include <iomanip>
+ 
 #include "SIPP.h"
 #include "ReservationTable.h"
 
@@ -23,32 +24,52 @@
 using std::cout;
 using std::endl;
 
-// ============================================================================
-// File-local flags / knobs (no header changes needed)
-// ============================================================================
-static bool  dss_debug_print           = false;   // flip for SII prints
-static const int REPLAN_COOLDOWN_TICKS = 3;       // per-agent replan hysteresis
-static const int SII_REBUILD_PERIOD    = 3;       // lazy global SII rebuild cadence
-static const bool LIGHTWEIGHT_MODE     = true;    // global cheap mode
+ 
 
-// Chokepoint-lite knobs
-static const int  HOT_CHOKE_THRESH     = 3;       // hot if ≥ traversals within horizon
-static const int  CHOKE_PENALTY_W      = 10;      // added to goal score per heat unit
-static const int  CHOKE_LOOKAHEAD_CAP  = 2;       // only penalize first 2 hot chokes on the greedy path
+ 
+static bool  dss_debug_print           = false;
 
-static std::vector<int> g_replan_cooldown;        // sized in initialize()
+ 
+static const int REPLAN_COOLDOWN_TICKS = 3;
 
+ 
+static const int SII_REBUILD_PERIOD    = 1;
+
+ static const int  HOT_CHOKE_THRESH     = 4;    
+static const int  CHOKE_PENALTY_W      = 6;    
+static const int  CHOKE_LOOKAHEAD_CAP  = 2;   
+
+// per-agent cool-down vector
+static std::vector<int> g_replan_cooldown;
+
+ 
+
+ 
 static inline int effective_planning_window(int base_window, int agents)
 {
-    if (!LIGHTWEIGHT_MODE) return base_window;
-    if      (agents >= 256) return std::max(8,   base_window / 3);
-    else if (agents >= 128) return std::max(12,  base_window / 2);
-    else if (agents >= 64)  return std::max(16,  (base_window * 2) / 3);
+    if (agents >= 256) return std::max(10, base_window * 2 / 3);
+    if (agents >= 128) return std::max(14, base_window * 4 / 5);
     return base_window;
 }
 
+ 
+static inline int adaptive_depth_cap(int stitch_depth, int agents)
+{
+    if (agents >= 256) return std::min(stitch_depth, 2);
+    if (agents >= 128) return std::min(stitch_depth, 2);
+    return stitch_depth;
+}
+
+// for very big fleets: only rank top-2 goals; else all
+static inline int prefilter_goal_topk(int bundle_size, int agents)
+{
+    if (agents >= 256) return std::min(bundle_size, 2);
+    if (agents >= 128) return std::min(bundle_size, 3);
+    return bundle_size;
+}
+
 // ============================================================================
-// Small utilities (all safe-by-construction)
+// Small utilities
 // ============================================================================
 static inline int grid_vertex_count(const KivaGrid& G)
 {
@@ -159,63 +180,6 @@ safe_step_path(const KivaGrid& G, int v0, int t0, int v_goal)
     return out;
 }
 
-// ============================================================================
-// Corridor Tokens (NEW): lightweight directed edge reservations on chokepoints
-// ============================================================================
-struct CorridorToken {
-    int u, v, t, aid;
-};
-static std::vector<CorridorToken> g_corridor_tokens;
-
-static inline void tokens_gc(int now_t, int keep_ahead_T)
-{
-    // Keep tokens within [now_t-1, now_t+keep_ahead_T]
-    const int lo = std::max(0, now_t - 1);
-    const int hi = std::max(lo, now_t + keep_ahead_T);
-    size_t w = 0;
-    for (size_t i = 0; i < g_corridor_tokens.size(); ++i) {
-        int tt = g_corridor_tokens[i].t;
-        if (tt >= lo && tt <= hi) {
-            g_corridor_tokens[w++] = g_corridor_tokens[i];
-        }
-    }
-    g_corridor_tokens.resize(w);
-}
-
-static inline void tokens_add_from_path(const KivaGrid& G, const std::vector<State>& path, int aid)
-{
-    if (path.size() < 2) return;
-    for (size_t i = 1; i < path.size(); ++i) {
-        int u = clamp_vertex(G, path[i-1].location);
-        int v = clamp_vertex(G, path[i].location);
-        int t = path[i].timestep;
-        if (u == v) continue;
-        // only on corridor-like degree-2 vertices to stay light
-        if (!(u >= 0 && v >= 0)) continue;
-        bool chokey = false;
-        // we'll mark if either endpoint is a chokepoint (set later once g_is_choke is built)
-        extern std::vector<char> g_is_choke; // forward ref to file-local static
-        if (u < (int)g_is_choke.size() && g_is_choke[u]) chokey = true;
-        if (v < (int)g_is_choke.size() && g_is_choke[v]) chokey = true;
-        if (!chokey) continue;
-
-        g_corridor_tokens.push_back({u, v, t, aid});
-    }
-}
-
-static inline void tokens_collect_initial_reservations(int now_t, int horizonT, int current_agent,
-                                                       std::list<std::tuple<int,int,int>>& out)
-{
-    for (const auto& tok : g_corridor_tokens) {
-        if (tok.aid == current_agent) continue; // don't block self
-        if (tok.t < now_t || tok.t > horizonT) continue;
-        out.emplace_back(tok.u, tok.v, tok.t);
-    }
-}
-
-// ============================================================================
-// Build Reservation Table from teammates + tokens
-// ============================================================================
 static inline void build_rt_from_teammates_safe(
     const KivaGrid& G,
     const std::vector<Path>& paths,
@@ -257,15 +221,12 @@ static inline void build_rt_from_teammates_safe(
 
         others[i] = std::move(tmp);
     }
-
-    // Corridor tokens as initial reservations (u,v,t)
-    std::list<std::tuple<int,int,int>> initial_res;
-    tokens_collect_initial_reservations(std::max(0, horizon_t - 1024), horizon_t, current_agent, initial_res);
-    rt.build(others, initial_res, current_agent);
+    std::list<std::tuple<int,int,int>> empty_initial;
+    rt.build(others, empty_initial, current_agent);
 }
 
 // ============================================================================
-// DSS: Safe Interval Index (per-vertex)
+// DSS: Safe Interval Index (per vertex)
 // ============================================================================
 struct SIInterval { int t0, t1; }; // inclusive
 
@@ -290,6 +251,7 @@ private:
     std::vector<std::vector<SIInterval>> si_;
 };
 
+// dbg print
 static void debug_print_intervals(const KivaGrid& /*G*/,
                                   const SafeIntervalIndex& sii,
                                   const std::vector<int>& vertices,
@@ -310,19 +272,18 @@ static void debug_print_intervals(const KivaGrid& /*G*/,
     }
 }
 
-// ======== GLOBAL (PER-TICK) SAFE INTERVAL INDEX (VERTEX), LAZY REBUILD ========
+// global SII
 static SafeIntervalIndex g_sii_tick;
 static int g_sii_horizonT = 0;
-static int g_sii_built_at = -1000000; // a time in the past
+static int g_sii_built_at = -1000000;
 
-// Merge [a,b] into vector of intervals (occupied), assuming arbitrary order
+// merge interval into occ
 static inline void push_occ(std::vector<SIInterval>& occ, int a, int b)
 {
     if (b < a) return;
     occ.push_back({a,b});
 }
 
-// Merge and normalize intervals: sort by t0, merge overlaps/adjacent
 static inline void normalize_intervals(std::vector<SIInterval>& v)
 {
     if (v.empty()) return;
@@ -342,7 +303,6 @@ static inline void normalize_intervals(std::vector<SIInterval>& v)
     v.resize(w);
 }
 
-// Invert [0..T] \ union(occ) into free intervals
 static inline std::vector<SIInterval> invert_to_free(const std::vector<SIInterval>& occ, int T)
 {
     std::vector<SIInterval> freev;
@@ -359,7 +319,7 @@ static inline std::vector<SIInterval> invert_to_free(const std::vector<SIInterva
     return freev;
 }
 
-// Build global vertex SII (compressed) up to horizon T
+// build global vertex SII
 static void build_global_vertex_sii_compressed(const KivaGrid& G,
                                                const std::vector<Path>& paths,
                                                int T,
@@ -394,7 +354,6 @@ static void build_global_vertex_sii_compressed(const KivaGrid& G,
                 int b0 = std::min(T, tj - 1);
                 if (a0 <= b0) push_occ(occ[vi], a0, b0);
             }
-
             if (tj <= T) push_occ(occ[vj], tj, tj);
         }
 
@@ -457,7 +416,7 @@ static inline int dss_interference_score(const KivaGrid& G,
 }
 
 // ============================================================================
-// Edge-aware SII (directed edges) — compressed, lazy rebuilt
+// Edge-aware SII (directed edges)
 // ============================================================================
 struct EdgeKey {
     int u, v;
@@ -559,11 +518,10 @@ static inline int min_incoming_edge_wait(const KivaGrid& G, int goal_v, int eta,
 }
 
 // ============================================================================
-// ==== CHOKEPOINTS (LITE) ====
-// Identify corridor-like degree-2 vertices once; per tick, score their heat.
+// Chokepoints
 // ============================================================================
-std::vector<char> g_is_choke;            // size = V, 1 if chokepoint (exposed for tokens)
-static std::unordered_map<int,int> g_choke_heat; // vertex -> traversal count
+static std::vector<char> g_is_choke;
+static std::unordered_map<int,int> g_choke_heat;
 static int g_choke_built_at = -1000000;
 static int g_choke_horizonT = 0;
 
@@ -573,13 +531,12 @@ static inline void build_chokepoints_once(const KivaGrid& G)
     g_is_choke.assign(V, 0);
     for (int v = 0; v < V; ++v) {
         const auto& nbs = G.get_neighbors(v);
-        if ((int)nbs.size() == 2) { // corridor interior
+        if ((int)nbs.size() == 2) {
             g_is_choke[v] = 1;
         }
     }
 }
 
-// Cheap heatmap: count how many agents traverse a choke within [t..T].
 static inline void build_choke_heat(const KivaGrid& G,
                                     const std::vector<Path>& paths,
                                     int now_t,
@@ -593,14 +550,13 @@ static inline void build_choke_heat(const KivaGrid& G,
             int t = p[i].timestep;
             if (t < now_t || t > horizonT) continue;
             int v = clamp_vertex(G, p[i].location);
-            if (v >= 0 && v < (int)g_is_choke.size() && g_is_choke[v]) {
+            if (v >= 0 && g_is_choke[v]) {
                 g_choke_heat[v] += 1;
             }
         }
     }
 }
 
-// Sum penalty along a greedy route start->goal (clamped to time window & few chokes)
 static inline int greedy_choke_penalty(const KivaGrid& G,
                                        int start_v, int start_t,
                                        int goal_v, int horizonT)
@@ -612,7 +568,7 @@ static inline int greedy_choke_penalty(const KivaGrid& G,
         int v = seq[i].first;
         int t = seq[i].second;
         if (t > horizonT) break;
-        if (v >= 0 && v < (int)g_is_choke.size() && g_is_choke[v]) {
+        if (v >= 0 && g_is_choke[v]) {
             auto it = g_choke_heat.find(v);
             if (it != g_choke_heat.end() && it->second > 0) {
                 penalty += CHOKE_PENALTY_W * it->second;
@@ -623,14 +579,13 @@ static inline int greedy_choke_penalty(const KivaGrid& G,
     return penalty;
 }
 
-// Is the first step from start going into a hot choke?
 static inline bool starts_into_hot_choke(const KivaGrid& G,
                                          int start_v, int start_t, int goal_v)
 {
     auto seq = safe_step_path(G, start_v, start_t, goal_v);
     if (seq.size() < 2) return false;
     int next_v = seq[1].first;
-    if (next_v >= 0 && next_v < (int)g_is_choke.size() && g_is_choke[next_v]) {
+    if (next_v >= 0 && g_is_choke[next_v]) {
         auto it = g_choke_heat.find(next_v);
         if (it != g_choke_heat.end() && it->second >= HOT_CHOKE_THRESH)
             return true;
@@ -638,15 +593,11 @@ static inline bool starts_into_hot_choke(const KivaGrid& G,
     return false;
 }
 
-// ============================================================================
-// KivaSystem core
-// ============================================================================
 KivaSystem::KivaSystem(const KivaGrid& G_, MAPFSolver& solver)
   : BasicSystem(G_, solver), G(G_) {}
 
 KivaSystem::~KivaSystem() {}
 
-// ------------------------------- initialize ---------------------------------
 void KivaSystem::initialize()
 {
     initialize_solvers();
@@ -660,7 +611,7 @@ void KivaSystem::initialize()
 
     bundle.assign(num_of_drives, {});
     rest.assign(num_of_drives, {});
-    bundle_dirty.assign(num_of_drives, true); // force stitch at t=0
+    bundle_dirty.assign(num_of_drives, true);
 
     bool succ = load_records();
     if (!succ)
@@ -675,7 +626,6 @@ void KivaSystem::initialize()
         }
     }
 
-    // build static chokepoints once
     build_chokepoints_once(G);
 
     bundle_configure(num_of_drives, default_agent_capacity, randomize_sequences, rng_seed);
@@ -835,7 +785,7 @@ void KivaSystem::bundle_mirror_to_engine()
     }
 }
 
-// --------------------------- DVS reorder (light) -----------------------------
+// -------------------------- reorder by DVS (light) --------------------------
 void KivaSystem::reorder_bundle_by_dvs(int k)
 {
     if (!safety_mode) return;
@@ -850,7 +800,7 @@ void KivaSystem::reorder_bundle_by_dvs(int k)
     for (auto &g : bundle[k])
         items.emplace_back(clamp_vertex(G, g.first), g.second);
 
-    std::vector<std::tuple<int,int,int>> scored;  // (dist, jitter, idx)
+    std::vector<std::tuple<int,int,int>> scored;
     scored.reserve(items.size());
     for (int i = 0; i < (int)items.size(); ++i) {
         int d = G.get_Manhattan_distance(start_v, items[i].first);
@@ -927,25 +877,32 @@ void KivaSystem::plan_stitched_for_agent(int k)
 
     const int start_v = safe_path_at(paths, G, k, timestep, consider_rotation).location;
     const int start_t = timestep;
+    const int AGENTS  = num_of_drives;
 
-    const int PLWIN = effective_planning_window(planning_window, num_of_drives);
+    const int PLWIN   = effective_planning_window(planning_window, AGENTS);
 
+    // collect goals
     std::vector<int> goals;
     goals.reserve(bundle[k].size());
     for (const auto& g : bundle[k]) goals.push_back(clamp_vertex(G, g.first));
     clean_goals(G, start_v, goals);
+
     if (goals.empty()) {
         bundle_dirty[k] = false;
         metrics_after_stitch(false, false, false, true);
         return;
     }
 
-    const int depth_cap = LIGHTWEIGHT_MODE ? std::min(stitch_depth, 2) : stitch_depth;
+    // depth adapt
+    const int depth_cap = adaptive_depth_cap(stitch_depth, AGENTS);
     if ((int)goals.size() > depth_cap) goals.resize(depth_cap);
 
-    // ===== DSS: rank goals by vertex interference + incoming edge hazard =====
-    // + Chokepoint-lite penalty along greedy path
-    std::vector<std::pair<int,int>> ranked; // (score, v)
+    // prefilter for very large fleets
+    const int keepK = prefilter_goal_topk((int)goals.size(), AGENTS);
+    if ((int)goals.size() > keepK) goals.resize(keepK);
+
+    // DSS ranking: vertex SII + incoming edge wait + choke penalty
+    std::vector<std::pair<int,int>> ranked;
     ranked.reserve(goals.size());
     for (int g : goals) {
         int v = clamp_vertex(G, g);
@@ -959,14 +916,14 @@ void KivaSystem::plan_stitched_for_agent(int k)
 
         int choke_pen = greedy_choke_penalty(G, start_v, start_t, v, start_t + PLWIN);
 
-        int sc = sc_v + wait_in * 6 + choke_pen;
-        ranked.emplace_back(sc, v);
+        int score = sc_v + wait_in * 6 + choke_pen;
+        ranked.emplace_back(score, v);
     }
     std::sort(ranked.begin(), ranked.end());
     goals.clear();
     for (auto &p : ranked) goals.push_back(p.second);
 
-    // ===== DSS: deferral — if front has no vertex window in [t, t+PLWIN], move to rest =====
+    // deferral: if the first has no vertex window in [t, t+PLWIN] → push to rest
     {
         const int q0 = start_t, q1 = start_t + PLWIN;
         if (!goals.empty()) {
@@ -985,18 +942,18 @@ void KivaSystem::plan_stitched_for_agent(int k)
         }
     }
 
-    // ===== Chokepoint-lite gating: avoid goals that begin with a HOT choke =====
+    // avoid starting straight into a hot choke — skip those, but don't starve
     {
         std::vector<int> kept;
         kept.reserve(goals.size());
         for (int v : goals) {
-            if (starts_into_hot_choke(G, start_v, start_t, v)) continue; // skip for now
+            if (starts_into_hot_choke(G, start_v, start_t, v)) continue;
             kept.push_back(v);
         }
         if (!kept.empty()) goals.swap(kept);
     }
 
-    // ===== DSS: gate chain by incoming edge feasibility near ETA =====
+    // edge-feasibility gate near ETA
     {
         std::vector<int> kept;
         kept.reserve(goals.size());
@@ -1023,58 +980,60 @@ void KivaSystem::plan_stitched_for_agent(int k)
     if (stitch_use_sipp) {
         used_sipp = true;
 
-        // Edge-aware start snapping (vertex snap + outgoing edge check)
-        int best_w_vertex = 0;
+        // small local SII around start+first
+        auto build_sii_sparse_local = [&](int horizon_t,
+                                          int around_v0,
+                                          int around_g,
+                                          SafeIntervalIndex& out_sii)
         {
-            // tiny local SII near start & first goal
-            SafeIntervalIndex sii_local;
+            const int V = G.get_rows() * G.get_cols();
+            const int T = std::max(0, horizon_t);
+            out_sii.init(V, T);
 
-            auto build_sii_sparse_local = [&](int horizon_t,
-                                              int around_v0,
-                                              int around_g,
-                                              SafeIntervalIndex& out_sii)
-            {
-                const int V = G.get_rows() * G.get_cols();
-                const int T = std::max(0, horizon_t);
-                out_sii.init(V, T);
-
-                auto near_any = [&](int v)->bool{
-                    if (G.get_Manhattan_distance(v, around_v0) <= 8) return true;
-                    if (G.get_Manhattan_distance(v, around_g ) <= 8) return true;
-                    return false;
-                };
-
-                std::unordered_map<int, std::vector<SIInterval>> occ;
-                for (int a = 0; a < (int)paths.size(); ++a) {
-                    if (paths[a].empty() || a == k) continue;
-                    std::vector<State> p = paths[a];
-                    p[0].location = clamp_vertex(G, p[0].location);
-                    for (size_t i = 1; i < p.size(); ++i) {
-                        p[i].location = clamp_vertex(G, p[i].location);
-                        if (p[i].timestep <= p[i-1].timestep) p[i].timestep = p[i-1].timestep + 1;
-                    }
-
-                    for (size_t i = 0; i + 1 < p.size(); ++i) {
-                        int vi = p[i].location, ti = std::max(0, p[i].timestep);
-                        int vj = p[i+1].location, tj = std::max(0, p[i+1].timestep);
-                        if (near_any(vi)) { int a0=std::max(0,ti), b0=std::min(T,tj-1); if (a0<=b0) push_occ(occ[vi], a0,b0); }
-                        if (near_any(vj) && tj <= T) push_occ(occ[vj], tj, tj);
-                    }
-                    int vlast=p.back().location, tlast=std::max(0,p.back().timestep);
-                    if (near_any(vlast) && tlast<=T) push_occ(occ[vlast], tlast, T);
-                }
-
-                for (auto &kv : occ) {
-                    normalize_intervals(kv.second);
-                    auto freev = invert_to_free(kv.second, T);
-                    out_sii.set_intervals_for_vertex(kv.first, std::move(freev));
-                }
+            auto near_any = [&](int v)->bool{
+                if (G.get_Manhattan_distance(v, around_v0) <= 8) return true;
+                if (G.get_Manhattan_distance(v, around_g ) <= 8) return true;
+                return false;
             };
 
-            int first_goal = goals.front();
-            const int localH = start_t + PLWIN;
-            build_sii_sparse_local(localH, clamp_vertex(G, start_v), clamp_vertex(G, first_goal), sii_local);
+            std::unordered_map<int, std::vector<SIInterval>> occ;
+            for (int a = 0; a < (int)paths.size(); ++a) {
+                if (paths[a].empty() || a == k) continue;
+                std::vector<State> p = paths[a];
+                p[0].location = clamp_vertex(G, p[0].location);
+                for (size_t i = 1; i < p.size(); ++i) {
+                    p[i].location = clamp_vertex(G, p[i].location);
+                    if (p[i].timestep <= p[i-1].timestep) p[i].timestep = p[i-1].timestep + 1;
+                }
 
+                for (size_t i = 0; i + 1 < p.size(); ++i) {
+                    int vi = p[i].location, ti = std::max(0, p[i].timestep);
+                    int vj = p[i+1].location, tj = std::max(0, p[i+1].timestep);
+                    if (near_any(vi)) { int a0=std::max(0,ti), b0=std::min(T,tj-1); if (a0<=b0) push_occ(occ[vi], a0,b0); }
+                    if (near_any(vj) && tj <= T) push_occ(occ[vj], tj, tj);
+                }
+                int vlast=p.back().location, tlast=std::max(0,p.back().timestep);
+                if (near_any(vlast) && tlast<=T) push_occ(occ[vlast], tlast, T);
+            }
+
+            for (auto &kv : occ) {
+                normalize_intervals(kv.second);
+                auto freev = invert_to_free(kv.second, T);
+                out_sii.set_intervals_for_vertex(kv.first, std::move(freev));
+            }
+        };
+
+        SafeIntervalIndex sii_local;
+        int first_goal = goals.front();
+        const int localH = start_t + PLWIN;
+        build_sii_sparse_local(localH,
+                               clamp_vertex(G, start_v),
+                               clamp_vertex(G, first_goal),
+                               sii_local);
+
+        // vertex snap
+        int best_w_vertex = 0;
+        {
             const auto& ivs = sii_local.at(clamp_vertex(G, start_v));
             bool snapped = false;
             for (const auto& I : ivs) {
@@ -1092,6 +1051,7 @@ void KivaSystem::plan_stitched_for_agent(int k)
             }
         }
 
+        // outgoing edge snap
         int extra_w_edge = min_outgoing_edge_wait(G, clamp_vertex(G, start_v),
                                                   start_t + best_w_vertex, PLWIN);
         if (extra_w_edge == INT_MAX) {
@@ -1103,7 +1063,7 @@ void KivaSystem::plan_stitched_for_agent(int k)
         }
         int best_w = best_w_vertex + extra_w_edge;
 
-        // Build RT once, try with snapped edge-aware offset (includes corridor tokens)
+        // RT
         ReservationTable rt(G);
         build_rt_from_teammates_safe(G, paths, k,
                                      start_t + PLWIN,
@@ -1133,7 +1093,7 @@ void KivaSystem::plan_stitched_for_agent(int k)
     }
 
     if (!sipp_ok) {
-        // deterministic, never fails
+        // deterministic fallback
         std::vector<std::pair<int,int>> seq;
         seq.emplace_back(start_v, start_t);
         int v = start_v, t = start_t;
@@ -1164,9 +1124,6 @@ void KivaSystem::plan_stitched_for_agent(int k)
     new_path.insert(new_path.end(), new_suffix.begin(), new_suffix.end());
     paths[k] = std::move(new_path);
 
-    // Add corridor tokens for this committed plan (only chokepoint edges)
-    tokens_add_from_path(G, new_suffix, k);
-
     suppress_replan_for(k);
     bundle_dirty[k] = false;
     metrics_after_stitch(used_sipp, sipp_ok, fell_back, false);
@@ -1195,38 +1152,7 @@ std::vector<int> KivaSystem::compute_batch_order() const
         return false;
     }), pool.end());
 
-    switch (stitch_batch_order) {
-    case StitchOrder::ByIndex:
-        break;
-    case StitchOrder::ShortestRemaining: {
-        std::sort(pool.begin(), pool.end(), [&](int a, int b){
-            int sa = safe_path_at(const_cast<std::vector<std::vector<State>>&>(paths), G, a, timestep, consider_rotation).location;
-            int sb = safe_path_at(const_cast<std::vector<std::vector<State>>&>(paths), G, b, timestep, consider_rotation).location;
-            auto cost = [&](int k, int s){
-                int c = 0, cur = s;
-                if (k >= 0 && k < (int)bundle.size())
-                    for (auto &g : bundle[k]) { c += G.get_Manhattan_distance(cur, clamp_vertex(G, g.first)); cur = clamp_vertex(G, g.first); }
-                return c;
-            };
-            return cost(a, sa) < cost(b, sb);
-        });
-        break;
-    }
-    case StitchOrder::ClosestNextGoal: {
-        std::sort(pool.begin(), pool.end(), [&](int a, int b){
-            int sa = safe_path_at(const_cast<std::vector<std::vector<State>>&>(paths), G, a, timestep, consider_rotation).location;
-            int sb = safe_path_at(const_cast<std::vector<std::vector<State>>&>(paths), G, b, timestep, consider_rotation).location;
-            int ca = (a >= 0 && a < (int)bundle.size() && !bundle[a].empty())
-                   ? G.get_Manhattan_distance(sa, clamp_vertex(G, bundle[a].front().first))
-                   : INT_MAX;
-            int cb = (b >= 0 && b < (int)bundle.size() && !bundle[b].empty())
-                   ? G.get_Manhattan_distance(sb, clamp_vertex(G, bundle[b].front().first))
-                   : INT_MAX;
-            return ca < cb;
-        });
-        break;
-    }
-    }
+    // keep ordering simple
     return pool;
 }
 
@@ -1234,41 +1160,36 @@ void KivaSystem::plan_stitched_batch()
 {
     auto to_go = compute_batch_order();
 
-    // decay cooldown counters once per tick
+    // decay cooldown once per tick
     if (g_replan_cooldown.size() == (size_t)num_of_drives) {
         for (int i = 0; i < num_of_drives; ++i) if (g_replan_cooldown[i] > 0) --g_replan_cooldown[i];
     }
 
-    // ===== Lazy Rebuild GLOBAL SII (vertex + edge) for this tick =====
-    const bool need_rebuild = (timestep - g_sii_built_at) >= SII_REBUILD_PERIOD;
-    const bool need_edge_rebuild = (timestep - g_edge_sii_built_at) >= SII_REBUILD_PERIOD;
-    const int PLWIN = effective_planning_window(planning_window, num_of_drives);
+    const int AGENTS   = num_of_drives;
+    const int PLWIN    = effective_planning_window(planning_window, AGENTS);
     const int horizonT = timestep + PLWIN;
 
-    if (need_rebuild) {
+    // rebuild global SII every tick (quality)
+    if ((timestep - g_sii_built_at) >= SII_REBUILD_PERIOD) {
         g_sii_horizonT = horizonT;
         build_global_vertex_sii_compressed(G, paths, g_sii_horizonT, g_sii_tick);
         g_sii_built_at = timestep;
     }
-    if (need_edge_rebuild) {
+    // rebuild global edge SII every tick
+    if ((timestep - g_edge_sii_built_at) >= SII_REBUILD_PERIOD) {
         g_edge_sii_horizonT = horizonT;
         build_global_edge_sii_compressed(G, paths, g_edge_sii_horizonT);
         g_edge_sii_built_at = timestep;
     }
-
-    // ===== Chokepoint heat (lite) each tick =====
+    // chokepoint heat
     if ((timestep - g_choke_built_at) >= 1) {
         g_choke_horizonT = horizonT;
         build_choke_heat(G, paths, timestep, g_choke_horizonT);
         g_choke_built_at = timestep;
     }
 
-    // ===== Corridor tokens GC =====
-    tokens_gc(timestep, PLWIN);
-
-    // planning budget per tick to avoid spikes
-    const int base_budget = std::max(4, num_of_drives / 5); // ~20%
-    const int BUDGET = LIGHTWEIGHT_MODE ? std::max(3, base_budget / 2) : base_budget;
+    // per-tick budget: scale with agents
+    int BUDGET = std::max(4, AGENTS / 5);  // ~20%
     if ((int)to_go.size() > BUDGET) to_go.resize(BUDGET);
 
     for (int k : to_go) {
@@ -1402,7 +1323,7 @@ void KivaSystem::update_goal_locations()
         return;
     }
 
-    // legacy update
+    // legacy update for non-capacity
     if (hold_endpoints)
     {
         unordered_map<int, int> held_locations;
@@ -1569,5 +1490,15 @@ void KivaSystem::simulate(int simulation_time)
     update_start_locations();
     std::cout << std::endl << "Done!" << std::endl;
     metrics_print_summary();
+
+       std::cout << "======================================" << std::endl;
+    std::cout << " Total tasks completed: " << num_of_tasks << std::endl;
+    std::cout << "======================================" << std::endl;
+    std::cout << "Average throughput: "
+          << std::fixed << std::setprecision(3)
+          << (double)num_of_tasks / (double)(timestep + 1)
+          << " tasks per timestep" << std::endl;
+
+
     save_results();
 }
