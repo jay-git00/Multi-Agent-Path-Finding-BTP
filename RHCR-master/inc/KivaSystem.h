@@ -81,7 +81,7 @@ private:
     void bundle_assert_capacity_ok(int k) const;
 
     void reorder_bundle_by_dvs(int k);
-    bool dss_debug_print = true; // set false to silence
+    bool dss_debug_print = true;  
 
     int  generate_endpoint_for(int k, int avoid_v) const;
     void maybe_autorefill_rest(int k);
@@ -90,23 +90,23 @@ private:
 
     void debug_print_capacity_state() const;
 
-    // ===== stitching =====
-    void plan_stitched_all_applicable_agents();     // kept for completeness
+   
+    void plan_stitched_all_applicable_agents();   
     void plan_stitched_for_agent(int k);
     void suppress_replan_for(int k);
     bool stitch_mode     = true;
-    int  stitch_target   = -1;    // -1 = all
+    int  stitch_target   = -1;    
     bool stitch_use_sipp = true;
 
-    // Batch stitching with RT injection
+ 
     void plan_stitched_batch();
     std::vector<int> compute_batch_order() const;
 
-    // RT helpers
+ 
     void build_rt_from_teammates(int current_agent, ReservationTable& rt) const;
     void build_rt_from_teammates_with_crop(int current_agent, int horizon_t, ReservationTable& rt) const;
 
-    // SIPP wait-retry helper (jam mitigation)
+ 
     bool try_sipp_with_initial_waits(int k, int start_v, int start_t,
                                      const std::vector<int>& goals,
                                      std::vector<State>& out_suffix);
@@ -116,7 +116,7 @@ private:
     bool restitch_on_change = true;
     int  stitch_depth       = 1;
 
-    // batch options
+ 
     StitchOrder stitch_batch_order = StitchOrder::ByIndex;
     bool stitch_crop_horizon = true;
 
@@ -142,13 +142,13 @@ private:
     void metrics_after_stitch(bool used_sipp, bool sipp_ok, bool fell_back, bool skipped_clean);
     void metrics_end_tick_and_maybe_log();
     void metrics_print_summary() const;
-    // Per-agent cooldown ticks remaining
+     
 static const int REPLAN_COOLDOWN_TICKS = 3;
-std::vector<int> replan_cooldown; // size = num_of_drives
+std::vector<int> replan_cooldown;  
 
 
 private:
-    // ===== original data we rely on =====
+    
     const KivaGrid& G;
     std::unordered_set<int> held_endpoints;
 };
