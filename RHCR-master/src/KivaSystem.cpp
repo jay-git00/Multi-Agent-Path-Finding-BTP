@@ -88,21 +88,56 @@ static inline int clamp_vertex(const KivaGrid& G, int v)
     return v;
 }
 
-static inline int pick_random_endpoint_except(const KivaGrid& G, int avoid)
+// Returns true if the robot's footprint fits at location 'center' without overlapping any obstacle.
+static bool footprint_fits_at(const KivaGrid& G, int center, const Footprint& fp)
 {
-    if (G.endpoints.empty())
-        return clamp_vertex(G, avoid);
-
-    int goal = G.endpoints[std::max(0, rand() % (int)G.endpoints.size())];
-    int guard = 16;
-    while (guard-- > 0 && goal == avoid && !G.endpoints.empty())
-        goal = G.endpoints[rand() % (int)G.endpoints.size()];
-
-    if (goal == avoid) {
-        for (int e : G.endpoints) { if (e != avoid) { goal = e; break; } }
-        if (goal == avoid) goal = G.endpoints.front();
+    int cols = G.cols;
+    int rows = G.rows;
+    int cx = center % cols;
+    int cy = center / cols;
+    for (auto& off : fp.offsets)
+    {
+        int nx = cx + off.second;
+        int ny = cy + off.first;
+        if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) return false;
+        int cell = ny * cols + nx;
+        if (G.types[cell] == "Obstacle") return false;
     }
-    return clamp_vertex(G, goal);
+    return true;
+}
+
+int KivaSystem::generate_endpoint_for(int k, int avoid_v) const
+{
+    // Flow Logic:
+    // Task 0, 2, 4... (Even): Goal is a **Station/Source/Sink** (warehouse_endpoints).
+    // Task 1, 3, 5... (Odd):  Goal is a **Shelf Corridor** (shelf_adjacent_endpoints).
+    // 
+    // Interpretation:
+    // - Sequence (Even -> Odd): "Insource" (Station -> Shelf). Robot picks at Station, drops at Shelf.
+    // - Sequence (Odd -> Even): "Outsource" (Shelf -> Station). Robot picks at Shelf, drops at Station.
+    
+    const std::vector<int>* pool;
+    if (task_count[k] % 2 == 0) pool = &warehouse_endpoints;
+    else pool = &shelf_adjacent_endpoints;
+
+    task_count[k]++; 
+
+    if (pool->empty()) return -1;
+
+    // Build a valid subset — only endpoints where this robot's footprint fits
+    const Footprint& fp = (k < (int)agent_footprints.size()) ? agent_footprints[k] : Footprint();
+    std::vector<int> valid_pool;
+    valid_pool.reserve(pool->size());
+    for (int ep : *pool)
+        if (ep != avoid_v && footprint_fits_at(G, ep, fp)) valid_pool.push_back(ep);
+
+    // Fallback: if no endpoint fits (shouldn't happen on a well-designed map), use any
+    if (valid_pool.empty()) valid_pool = *pool;
+    
+    std::mt19937 rng(rng_seed + k + timestep + task_count[k]);
+    std::uniform_int_distribution<int> dist(0, valid_pool.size() - 1);
+    
+    return valid_pool[dist(rng)];
 }
 
 static inline const State& safe_path_at(std::vector<std::vector<State>>& paths,
@@ -179,7 +214,6 @@ safe_step_path(const KivaGrid& G, int v0, int t0, int v_goal)
     }
     return out;
 }
-
 static inline void build_rt_from_teammates_safe(
     const KivaGrid& G,
     const std::vector<Path>& paths,
@@ -187,7 +221,8 @@ static inline void build_rt_from_teammates_safe(
     int horizon_t,
     bool crop_to_horizon,
     bool consider_rotation,
-    ReservationTable& rt)
+    ReservationTable& rt,
+    const vector<Footprint>& footprints)
 {
     std::vector<Path> others(paths.size());
     for (int i = 0; i < (int)paths.size(); ++i) {
@@ -222,7 +257,7 @@ static inline void build_rt_from_teammates_safe(
         others[i] = std::move(tmp);
     }
     std::list<std::tuple<int,int,int>> empty_initial;
-    rt.build(others, empty_initial, current_agent);
+    rt.build(others, empty_initial, {}, current_agent, paths[current_agent].front().location, footprints);
 }
 
 // ============================================================================
@@ -594,7 +629,7 @@ static inline bool starts_into_hot_choke(const KivaGrid& G,
 }
 
 KivaSystem::KivaSystem(const KivaGrid& G_, MAPFSolver& solver)
-  : BasicSystem(G_, solver), G(G_) {}
+  : BasicSystem(G_, solver), G(G_), scheduler(G_) {}
 
 KivaSystem::~KivaSystem() {}
 
@@ -606,14 +641,46 @@ void KivaSystem::initialize()
     goal_locations.resize(num_of_drives);
     paths.resize(num_of_drives);
     finished_tasks.resize(num_of_drives);
+    if (agent_footprints.empty())
+        agent_footprints.assign(num_of_drives, Footprint::Square(3)); 
 
     g_replan_cooldown.assign(num_of_drives, 0);
+    task_count.assign(num_of_drives, 0); 
 
     bundle.assign(num_of_drives, {});
     rest.assign(num_of_drives, {});
     bundle_dirty.assign(num_of_drives, true);
 
     bool succ = load_records();
+    if (!succ)
+    {
+        cout << "Warning: Records not loaded, using default initialization." << endl;
+    }
+
+    // Categorize endpoints for Insource/Outsource flow
+    warehouse_endpoints.clear();
+    shelf_adjacent_endpoints.clear();
+    for (int ep : G.endpoints)
+    {
+        bool next_to_shelf = false;
+        for (int neighbor : G.get_neighbors(ep))
+        {
+            if (neighbor >= 0 && neighbor < G.size() && G.types[neighbor] == "Obstacle")
+            {
+                next_to_shelf = true;
+                break;
+            }
+        }
+        if (next_to_shelf) shelf_adjacent_endpoints.push_back(ep);
+        else warehouse_endpoints.push_back(ep);
+    }
+    
+    if (warehouse_endpoints.empty()) warehouse_endpoints = G.endpoints;
+    if (shelf_adjacent_endpoints.empty()) shelf_adjacent_endpoints = G.endpoints;
+
+    cout << "Flow Semantics: " << warehouse_endpoints.size() << " peripheral endpoints, " 
+         << shelf_adjacent_endpoints.size() << " shelf corridors." << endl;
+
     if (!succ)
     {
         timestep = 0;
@@ -654,7 +721,9 @@ void KivaSystem::initialize_goal_locations()
     for (int k = 0; k < num_of_drives; k++)
     {
         int curr = safe_path_at(paths, G, k, 0, consider_rotation).location;
-        int goal = pick_random_endpoint_except(G, curr);
+        // Task 0: generate_endpoint_for will return a Station (warehouse_endpoint)
+        // task_count[k] is 0 initially.
+        int goal = generate_endpoint_for(k, curr);
         goal_locations[k].emplace_back(goal, 0);
     }
 }
@@ -664,7 +733,7 @@ void KivaSystem::ensure_goal_exists(int k, int curr)
 {
     if (k < 0 || k >= (int)goal_locations.size()) return;
     if (!goal_locations[k].empty()) return;
-    int g = pick_random_endpoint_except(G, curr);
+    int g = generate_endpoint_for(k, curr);
     goal_locations[k].emplace_back(g, 0);
 }
 
@@ -715,6 +784,7 @@ bool KivaSystem::bundle_on_goal_reached(int k)
         bundle[k].pop_front();
         bundle_dirty[k] = true;
         m_restitches_total++;
+        num_of_tasks++; // Increment global task counter
         return true;
     }
     return false;
@@ -788,41 +858,66 @@ void KivaSystem::bundle_mirror_to_engine()
 // -------------------------- reorder by DVS (light) --------------------------
 void KivaSystem::reorder_bundle_by_dvs(int k)
 {
-    if (!safety_mode) return;
+    if (!safety_mode) return; // ONLY reorder if safety mode is ON
     if (k < 0 || k >= (int)bundle.size()) return;
-    if (bundle[k].size() <= 1) return;
+    if (bundle[k].size() <= 1) return; // Nothing to reorder
 
-    const int start_v =
-        safe_path_at(paths, G, k, timestep, consider_rotation).location;
+    // Capture old order to see if we actually changed anything
+    std::deque<std::pair<int,int>> old_bundle = bundle[k];
 
-    std::vector<std::pair<int,int>> items;
-    items.reserve(bundle[k].size());
-    for (auto &g : bundle[k])
-        items.emplace_back(clamp_vertex(G, g.first), g.second);
+    // 1. Current State
+    const int start_v = safe_path_at(paths, G, k, timestep, consider_rotation).location;
 
-    std::vector<std::tuple<int,int,int>> scored;
-    scored.reserve(items.size());
-    for (int i = 0; i < (int)items.size(); ++i) {
-        int d = G.get_Manhattan_distance(start_v, items[i].first);
-        int jitter = rand() & 0xF;
-        scored.emplace_back(d, jitter, i);
+    // 2. Prepare Scheduler Inputs (Current positions of all agents)
+    std::vector<State> current_states(num_of_drives);
+    for(int i=0; i<num_of_drives; ++i) {
+        current_states[i] = safe_path_at(paths, G, i, timestep, consider_rotation);
     }
 
-    std::sort(scored.begin(), scored.end());
+    // 3. Separate Goals into SAFE and UNSAFE (Deadlock Check)
+    std::vector<std::pair<int,int>> safe_goals;
+    std::vector<std::pair<int,int>> unsafe_goals;
+    int primary_target = bundle[k].front().first;
 
-    std::deque<std::pair<int,int>> reordered;
-    for (auto &s : scored)
-        reordered.push_back(items[std::get<2>(s)]);
+    for (auto &g : bundle[k]) {
+        int goal_node = clamp_vertex(G, g.first);
+        // CFNRS Algorithm 4 check:
+        if (scheduler.is_safe_move(k, start_v, goal_node, current_states, paths)) {
+            safe_goals.emplace_back(goal_node, g.second);
+        } else {
+            unsafe_goals.emplace_back(goal_node, g.second);
+        }
+    }
 
-    bundle[k] = std::move(reordered);
-    bundle_dirty[k] = true;
-    m_restitches_total++;
+    // 4. Sort SAFE goals by Distance (Greedy Efficiency)
+    auto dist_sorter = [&](const std::pair<int,int>& a, const std::pair<int,int>& b) {
+        int da = G.get_Manhattan_distance(start_v, a.first);
+        int db = G.get_Manhattan_distance(start_v, b.first);
+        return da < db;
+    };
+    std::sort(safe_goals.begin(), safe_goals.end(), dist_sorter);
+    
+    // Sort UNSAFE goals too
+    std::sort(unsafe_goals.begin(), unsafe_goals.end(), dist_sorter);
+
+    if (!unsafe_goals.empty()) {
+        cout << "[ALGO 2] Deadlock predicted for Robot " << k << "! Found " << unsafe_goals.size() << " unsafe goals." << endl;
+    }
+
+    // 5. Reconstruct Bundle: Safe First -> Then Unsafe
+    bundle[k].clear();
+    for (auto &g : safe_goals) bundle[k].push_back(g);
+    for (auto &g : unsafe_goals) bundle[k].push_back(g);
+
+    // 6. Only mark dirty if the order actually changed!
+    if (bundle[k] != old_bundle) {
+        bundle_dirty[k] = true;
+        m_restitches_total++;
+        cout << "[ALGO 5] Safe Reordering: Robot " << k << " swapped " << primary_target << " -> " << bundle[k].front().first << " to avoid deadlock." << endl;
+    }
 }
 
-int KivaSystem::generate_endpoint_for(int, int avoid_v) const
-{
-    return pick_random_endpoint_except(G, avoid_v);
-}
+
 
 void KivaSystem::maybe_autorefill_rest(int k)
 {
@@ -1069,7 +1164,8 @@ void KivaSystem::plan_stitched_for_agent(int k)
                                      start_t + PLWIN,
                                      /*crop=*/stitch_crop_horizon,
                                      consider_rotation,
-                                     rt);
+                                     rt,
+                                     agent_footprints);
 
         State s0(clamp_vertex(G, start_v), start_t + best_w, -1);
         std::vector<std::pair<int,int>> gl; gl.reserve(goals.size());
@@ -1310,7 +1406,7 @@ void KivaSystem::update_goal_locations()
             bool topped = bundle_maybe_top_up(k);
             bool changed = popped || topped;
 
-            if (safety_mode) { reorder_bundle_by_dvs(k); changed = true; }
+            if (safety_mode) { reorder_bundle_by_dvs(k); }
 
             if (changed) bundle_dirty[k] = true;
 
@@ -1332,10 +1428,10 @@ void KivaSystem::update_goal_locations()
             int curr = safe_path_at(paths, G, k, timestep, consider_rotation).location;
             if (goal_locations[k].empty())
             {
-                int next = pick_random_endpoint_except(G, curr);
+                int next = generate_endpoint_for(k, curr);
                 while (next == curr || held_endpoints.find(next) != held_endpoints.end())
                 {
-                    next = pick_random_endpoint_except(G, curr);
+                    next = generate_endpoint_for(k, curr);
                 }
                 goal_locations[k].emplace_back(next, 0);
                 held_endpoints.insert(next);
@@ -1407,7 +1503,7 @@ void KivaSystem::update_goal_locations()
                 }
                 if (goal_locations[k].size() == 1)
                 {
-                    int next = pick_random_endpoint_except(G, curr);
+                    int next = generate_endpoint_for(k, curr);
                     goal_locations[k].emplace(goal_locations[k].begin(), next, 0);
                     new_agents.emplace_back(k);
                 }
@@ -1424,13 +1520,13 @@ void KivaSystem::update_goal_locations()
                     std::pair<int, int> next;
                     if (is_endpoint_safe(G, goal.first))
                     {
-                        next = std::make_pair(pick_random_endpoint_except(G, curr), 0);
+                        next = std::make_pair(generate_endpoint_for(k, curr), 0);
                     }
                     else
                     {
                         std::cout << "WARN update_goal_locations(): non-endpoint goal " << goal.first
                                   << " – sampling an endpoint instead.\n";
-                        next = std::make_pair(pick_random_endpoint_except(G, curr), 0);
+                        next = std::make_pair(generate_endpoint_for(k, curr), 0);
                     }
                     goal_locations[k].emplace_back(next);
                     min_timesteps += G.get_Manhattan_distance(next.first, goal.first);
@@ -1453,11 +1549,14 @@ void KivaSystem::simulate(int simulation_time)
         std::cout << "Timestep " << timestep << std::endl;
 
         metrics_begin_tick();
+        scheduler.clear_graph(); // Clear dependencies for the new tick
 
         update_start_locations();
         update_goal_locations();
 
         if (capacity_mode && stitch_mode) {
+            // Algorithm 1: Problem Reduction
+            // Only plan for agents that aren't already sitting safely on their goals
             plan_stitched_batch();
         }
 

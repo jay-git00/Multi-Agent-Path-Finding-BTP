@@ -131,7 +131,10 @@ int main(int argc, char** argv)
 		("prioritize_start", po::value<bool>()->default_value(true), "Prioritize waiting at start locations")
 		("suboptimal_bound", po::value<double>()->default_value(1), "Suboptimal bound for ECBS")
 		("log", po::value<bool>()->default_value(false), "save the search trees (and the priority trees)")
-		
+		("safety", po::value<bool>()->default_value(true), "enable CFNRS safety scheduler")
+		("model", po::value<string>()->default_value("BASELINE"), "proposed models (BASELINE, APS_CFNRS)")
+		("capacity", po::value<int>()->default_value(1), "agent task capacity for APS")
+		("footprint", po::value<int>()->default_value(3), "robot footprint size (1: point, 3: 3x3 square)")
 		;
 	clock_t start_time = clock();
 	po::variables_map vm;
@@ -184,6 +187,19 @@ int main(int argc, char** argv)
 		MAPFSolver* solver = set_solver(G, vm);
 		KivaSystem system(G, *solver);
 		set_parameters(system, vm);
+
+        // Model selection
+        bool use_aps = (vm["model"].as<string>() == "APS_CFNRS");
+        system.setCapacityMode(use_aps);
+        system.setStitchMode(use_aps);
+        system.setSafetyMode(vm["safety"].as<bool>()); 
+        system.setAgentCapacity(vm["capacity"].as<int>());
+        system.setMetricsVerbose(true);
+        
+        int fpsize = vm["footprint"].as<int>();
+        std::vector<Footprint> footprints(system.num_of_drives, Footprint::Square(fpsize));
+        system.setAgentFootprints(footprints);
+
 		G.preprocessing(system.consider_rotation);
 		system.simulate(vm["simulation_time"].as<int>());
 		return 0;

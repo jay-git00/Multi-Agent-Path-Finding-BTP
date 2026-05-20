@@ -56,9 +56,10 @@ public:
     // validate
     bool validate_solution();
     void print_solution() const;
+    vector<Footprint> agent_footprints;
+    ReservationTable rt;
 protected:
     vector<vector<bool> > cat; // conflict avoidance table
     vector<unordered_set< pair<int, int> > > constraint_table;
-    ReservationTable rt;
 };
 

@@ -5,6 +5,11 @@ void ReservationTable::updateSIT(size_t location)
 {
 	if (sit.find(location) == sit.end())
 	{
+        if (location < map_size && G.types[location] == "@")
+        {
+            sit[location] = list<Interval>();
+            return;
+        }
 		const auto& it = ct.find(location);
 		if (it != ct.end())
 		{
@@ -198,7 +203,7 @@ void ReservationTable::insertSoftConstraint2SIT(int location, int t_min, int t_m
 }
 
 
-void ReservationTable::insertPath2CT(const Path& path)
+void ReservationTable::insertPath2CT(const Path& path, const Footprint& footprint)
 {
 	if (path.empty())
 		return;
@@ -209,8 +214,11 @@ void ReservationTable::insertPath2CT(const Path& path)
 	{
 		if (prev->location != curr->location)
 		{
-			if (G.types[prev->location] != "Magic")
-				ct[prev->location].emplace_back(prev->timestep - k_robust, curr->timestep + k_robust);
+            for (int loc : G.get_footprint_locations(prev->location, footprint))
+            {
+			    if (G.types[loc] != "Magic")
+				    ct[loc].emplace_back(prev->timestep - k_robust, curr->timestep + k_robust);
+            }
 			if (k_robust == 0) // add edge constraint
 			{
 				ct[getEdgeIndex(curr->location, prev->location)].emplace_back(curr->timestep, curr->timestep + 1);
@@ -221,8 +229,11 @@ void ReservationTable::insertPath2CT(const Path& path)
 	}
 	if (curr != path.end())
 	{
-		if (G.types[prev->location] != "Magic")
-			ct[prev->location].emplace_back(prev->timestep - k_robust, curr->timestep + k_robust);
+        for (int loc : G.get_footprint_locations(prev->location, footprint))
+        {
+		    if (G.types[loc] != "Magic")
+			    ct[loc].emplace_back(prev->timestep - k_robust, curr->timestep + k_robust);
+        }
 		if (k_robust == 0) // add edge constraint
 		{
 			ct[getEdgeIndex(curr->location, prev->location)].emplace_back(curr->timestep, curr->timestep + 1);
@@ -230,30 +241,46 @@ void ReservationTable::insertPath2CT(const Path& path)
 	}
 	else
 	{
-		if (G.types[prev->location] != "Magic")
-			ct[prev->location].emplace_back(prev->timestep - k_robust, path.back().timestep + 1 + k_robust);
+        for (int loc : G.get_footprint_locations(prev->location, footprint))
+        {
+		    if (G.types[loc] != "Magic")
+			    ct[loc].emplace_back(prev->timestep - k_robust, path.back().timestep + 1 + k_robust);
+        }
 		if (k_robust == 0) // add edge constraint
 		{
 			ct[getEdgeIndex(path.back().location, prev->location)].emplace_back(path.back().timestep, path.back().timestep + 1);
 		}
 	}
-	if (hold_endpoints && G.types[prev->location] != "Magic")
-		ct[path.back().location].emplace_back(path.back().timestep, INTERVAL_MAX);
+	if (hold_endpoints)
+    {
+        for (int loc : G.get_footprint_locations(path.back().location, footprint))
+        {
+            if (G.types[loc] != "Magic")
+		        ct[loc].emplace_back(path.back().timestep, INTERVAL_MAX);
+        }
+    }
 }
 
-void ReservationTable::addInitialConstraints(const list< tuple<int, int, int> >& initial_constraints, int current_agent)
+void ReservationTable::addInitialConstraints(const list< tuple<int, int, int> >& initial_constraints, int current_agent, const vector<Footprint>& footprints)
 {
 	for (auto con : initial_constraints)
 	{
-		if (std::get<0>(con) != current_agent && 0 <= std::get<1>(con) && std::get<1>(con) < G.types.size() &&
-			G.types[std::get<1>(con)] != "Magic")
-			ct[std::get<1>(con)].emplace_back(0, min(window, std::get<2>(con)));
+		if (std::get<0>(con) != current_agent && 0 <= std::get<1>(con) && std::get<1>(con) < G.types.size())
+        {
+            int other_agent = std::get<0>(con);
+            Footprint fp = (other_agent < (int)footprints.size()) ? footprints[other_agent] : Footprint();
+            for (int loc : G.get_footprint_locations(std::get<1>(con), fp))
+            {
+			    if (G.types[loc] != "Magic")
+				    ct[loc].emplace_back(0, min(window, std::get<2>(con)));
+            }
+        }
 	}
 }
 
 
 //  insert the path to the conflict avoidance table
-void ReservationTable::insertPath2CAT(const Path& path)
+void ReservationTable::insertPath2CAT(const Path& path, const Footprint& footprint)
 {
 	if (path.empty())
 		return;
@@ -261,32 +288,41 @@ void ReservationTable::insertPath2CAT(const Path& path)
 	int timestep = 0;
 	while (timestep <= max_timestep)
 	{
-		int location = path[timestep].location;
-		if (G.types[location] != "Magic")
-		{
-			for (int t = max(0, timestep - k_robust); t <= min((int)cat.size() - 1, timestep + k_robust); t++)
-			{
-				cat[t][location] = true;
-			}
-		}
+        for (int location : G.get_footprint_locations(path[timestep].location, footprint))
+        {
+		    if (G.types[location] != "Magic")
+		    {
+			    for (int t = max(0, timestep - k_robust); t <= min((int)cat.size() - 1, timestep + k_robust); t++)
+			    {
+				    cat[t][location] = true;
+			    }
+		    }
+        }
 		timestep++;
 	}
-	if (G.types[path.back().location] != "Magic")
-	{
-		while (timestep < (int)cat.size()) // assume that the agent waits at its last location
-		{
-			cat[timestep][path.back().location] = true;
-			timestep++;
-		}
-	}
+    
+    for (int location : G.get_footprint_locations(path.back().location, footprint))
+    {
+	    if (G.types[location] != "Magic")
+	    {
+		    while (timestep < (int)cat.size()) // assume that the agent waits at its last location
+		    {
+			    cat[timestep][location] = true;
+			    timestep++;
+		    }
+	    }
+    }
 }
 
 // For PBS
 void ReservationTable::build(const vector<Path*>& paths,
         const list< tuple<int, int, int> >& initial_constraints,
-        const unordered_set<int>& high_priority_agents, int current_agent, int start_location)
+        const unordered_set<int>& high_priority_agents, int current_agent, 
+        int start_location, const vector<Footprint>& footprints)
 {
     clock_t t = std::clock();
+    
+    current_footprint = (current_agent < (int)footprints.size()) ? footprints[current_agent] : Footprint();
 
     // add hard constraints
     vector<bool> soft(num_of_agents, true);
@@ -294,16 +330,16 @@ void ReservationTable::build(const vector<Path*>& paths,
     {
         if (paths[i] == nullptr)
             continue;
-		insertPath2CT(*paths[i]);
+		insertPath2CT(*paths[i], footprints[i]);
 		soft[i] = false;
     }
 
     if (prioritize_start) // prioritize waits at start locations
     {
-        insertConstraints4starts(paths, current_agent, start_location);
+        insertConstraints4starts(paths, current_agent, start_location, footprints);
     }
 
-	addInitialConstraints(initial_constraints, current_agent); // add initial constraints
+	addInitialConstraints(initial_constraints, current_agent, footprints); // add initial constraints
    
     runtime = (std::clock() - t) * 1.0  / CLOCKS_PER_SEC;
     if (!use_cat)
@@ -315,16 +351,39 @@ void ReservationTable::build(const vector<Path*>& paths,
     {
         if(!soft[i] || paths[i] == nullptr)
             continue;
-		insertPath2CAT(*paths[i]);
+		insertPath2CAT(*paths[i], footprints[i]);
     }
 
+    runtime = (std::clock() - t) * 1.0  / CLOCKS_PER_SEC;
+}
+
+void ReservationTable::build(const vector<Path>& paths,
+        const list< tuple<int, int, int> >& initial_constraints,
+        const unordered_set<int>& high_priority_agents, int current_agent, 
+        int start_location, const vector<Footprint>& footprints)
+{
+    clock_t t = std::clock();
+    
+    current_footprint = (current_agent < (int)footprints.size()) ? footprints[current_agent] : Footprint();
+
+    // add hard constraints
+    for (auto i : high_priority_agents)
+    {
+        if (i >= (int)paths.size() || paths[i].empty())
+            continue;
+		insertPath2CT(paths[i], footprints[i]);
+    }
+
+    addInitialConstraints(initial_constraints, current_agent, footprints); // add initial constraints
+   
     runtime = (std::clock() - t) * 1.0  / CLOCKS_PER_SEC;
 }
 
 // For WHCA*
 void ReservationTable::build(const vector<Path>& paths,
                             const list< tuple<int, int, int> >& initial_constraints,
-                            int current_agent)
+                            int current_agent,
+                            const vector<Footprint>& footprints)
 {
     clock_t t = std::clock();
     // add hard constraints
@@ -332,17 +391,19 @@ void ReservationTable::build(const vector<Path>& paths,
     {
 		if (i == current_agent)
 			continue;
-		insertPath2CT(paths[i]);
+        Footprint fp = (i < (int)footprints.size()) ? footprints[i] : Footprint();
+		insertPath2CT(paths[i], fp);
     }
 
-	addInitialConstraints(initial_constraints, current_agent); // add initial constraints
+	addInitialConstraints(initial_constraints, current_agent, footprints); // add initial constraints
     runtime = (std::clock() - t) * 1.0  / CLOCKS_PER_SEC;
 }
 
 // For ECBS
 void ReservationTable::build(const vector<Path*>& paths,
                             const list< tuple<int, int, int> >& initial_constraints,
-                            const list< Constraint >& hard_constraints, int current_agent)
+                            const list< Constraint >& hard_constraints, int current_agent,
+                            const vector<Footprint>& footprints)
 {
     clock_t t = std::clock();
     // add hard constraints
@@ -363,7 +424,7 @@ void ReservationTable::build(const vector<Path*>& paths,
 		}
     }
 
-	addInitialConstraints(initial_constraints, current_agent); // add initial constraints
+	addInitialConstraints(initial_constraints, current_agent, footprints); // add initial constraints
 
     /* add soft constraints */
 	// compute the max timestep that cat needs
@@ -389,13 +450,14 @@ void ReservationTable::build(const vector<Path*>& paths,
 		if (i == current_agent || paths[i] == nullptr)
 			continue;
 		
-       insertPath2CAT(*paths[i]);
+        Footprint fp = (i < (int)footprints.size()) ? footprints[i] : Footprint();
+        insertPath2CAT(*paths[i], fp);
     }
     runtime = (std::clock() - t) * 1.0  / CLOCKS_PER_SEC;
 }
 
 
-void ReservationTable::insertConstraints4starts(const vector<Path*>& paths, int current_agent, int start_location)
+void ReservationTable::insertConstraints4starts(const vector<Path*>& paths, int current_agent, int start_location, const vector<Footprint>& footprints)
 {
     for (int i = 0; i < num_of_agents; i++)
     {
@@ -404,8 +466,9 @@ void ReservationTable::insertConstraints4starts(const vector<Path*>& paths, int 
         else if (i != current_agent)// prohibit the agent from conflicting with other agents at their start locations
         {
             int start = paths[i]->front().location;
-            if (start < 0 || G.types[start] == "Magic")
+            if (start < 0)
                 continue;
+            
             for (auto state : (*paths[i]))
             {
                 if (state.location != start) // The agent starts to move
@@ -413,7 +476,11 @@ void ReservationTable::insertConstraints4starts(const vector<Path*>& paths, int 
                     // The agent waits at its start locations between [appear_time, state.timestep - 1]
                     // So other agents cannot use this start location between
                     // [appear_time - k_robust, state.timestep + k_robust - 1]
-                    ct[start].emplace_back(0, state.timestep + k_robust);
+                    for (int loc : G.get_footprint_locations(start, footprints[i]))
+                    {
+                        if (G.types[loc] != "Magic")
+                            ct[loc].emplace_back(0, state.timestep + k_robust);
+                    }
                     break;
                 }
             }
@@ -428,27 +495,68 @@ list<Interval> ReservationTable::getSafeIntervals(int location, int lower_bound,
     if (lower_bound >= upper_bound)
         return safe_intervals;
 
-	updateSIT(location);
-	
-	auto it = sit.find(location);
+    auto locations = G.get_footprint_locations(location, current_footprint);
+    if (locations.empty())
+    {
+        safe_intervals.emplace_back(0, INTERVAL_MAX, 0);
+        return safe_intervals;
+    }
+
+    // Initialize with safe intervals of the first location in footprint
+    int first_loc = locations[0];
+    updateSIT(first_loc);
+    auto it = sit.find(first_loc);
     if (it == sit.end()) 
     {
-		safe_intervals.emplace_back(0, INTERVAL_MAX, 0);
-		return safe_intervals;
+        safe_intervals.emplace_back(0, INTERVAL_MAX, 0);
+    }
+    else
+    {
+        for(auto interval : it->second)
+        {
+            if (lower_bound >= std::get<1>(interval)) continue;
+            else if (upper_bound <= std::get<0>(interval)) break;
+            else safe_intervals.emplace_back(interval);
+        }
     }
 
-    for(auto interval : it->second)
+    // Intersect with subsequent locations in footprint
+    for (size_t i = 1; i < locations.size(); ++i)
     {
-        if (lower_bound >= std::get<1>(interval))
-            continue;
-        else if (upper_bound <= std::get<0>(interval))
-            break;
+        int loc = locations[i];
+        updateSIT(loc);
+        auto it_loc = sit.find(loc);
+        list<Interval> loc_intervals;
+        if (it_loc == sit.end())
+        {
+            loc_intervals.emplace_back(0, INTERVAL_MAX, 0);
+        }
         else
         {
-            safe_intervals.emplace_back(interval);
+            for(auto interval : it_loc->second)
+            {
+                if (lower_bound >= std::get<1>(interval)) continue;
+                else if (upper_bound <= std::get<0>(interval)) break;
+                else loc_intervals.emplace_back(interval);
+            }
         }
 
+        list<Interval> intersected;
+        auto it1 = safe_intervals.begin();
+        auto it2 = loc_intervals.begin();
+        while (it1 != safe_intervals.end() && it2 != loc_intervals.end())
+        {
+            int t_min = max(std::get<0>(*it1), std::get<0>(*it2));
+            int t_max = min(std::get<1>(*it1), std::get<1>(*it2));
+            if (t_min < t_max)
+                intersected.emplace_back(t_min, t_max, std::get<2>(*it1) + std::get<2>(*it2));
+            if (t_max == std::get<1>(*it1)) ++it1;
+            else ++it2;
+        }
+        safe_intervals = std::move(intersected);
+        if (safe_intervals.empty()) break;
     }
+
     return safe_intervals;
 }
 
@@ -480,26 +588,19 @@ list<Interval> ReservationTable::getSafeIntervals(int from, int to, int lower_bo
 
 Interval ReservationTable::getFirstSafeInterval(int location)
 {
-	updateSIT(location);
-    auto it = sit.find(location);
-    if (it == sit.end())
+	auto safe_intervals = getSafeIntervals(location, 0, INTERVAL_MAX);
+    if (safe_intervals.empty())
     {
-		return Interval(0, INTERVAL_MAX, 0);
+        return Interval(INTERVAL_MAX, INTERVAL_MAX, 0);
     }
-    return it->second.front();
+    return safe_intervals.front();
 }
 
 // find a safe interval with t_min as given
 bool ReservationTable::findSafeInterval(Interval& interval, int location, int t_min)
 {
-	updateSIT(location);
-
-    auto it = sit.find(location);
-    if (it == sit.end())
-    {
-		return t_min == 0;
-    }
-    for( auto i : it->second)
+	auto safe_intervals = getSafeIntervals(location, t_min, INTERVAL_MAX);
+    for( auto i : safe_intervals)
     {
         if (t_min == std::get<0>(i))
         {
@@ -541,19 +642,23 @@ void ReservationTable::printCT(size_t location) const
 
 bool ReservationTable::isConstrained(int curr_id, int next_id, int next_timestep) const
 {
-	auto it = ct.find(next_id);
-	if (it != ct.end())
-	{
-		for (auto time_range : it->second)
-		{
-			if (next_timestep >= time_range.first && next_timestep < time_range.second)
-				return true;
-		}
-	}
-
+    for (int loc : G.get_footprint_locations(next_id, current_footprint))
+    {
+	    auto it = ct.find(loc);
+	    if (it != ct.end())
+	    {
+		    for (auto time_range : it->second)
+		    {
+			    if (next_timestep >= time_range.first && next_timestep < time_range.second)
+				    return true;
+		    }
+	    }
+    }
+    
+    // Edge constraints (assuming point-agent swap for now, or we could expand this)
 	if (curr_id != next_id)
 	{
-		it = ct.find(getEdgeIndex(curr_id, next_id));
+		auto it = ct.find(getEdgeIndex(curr_id, next_id));
 		if (it != ct.end())
 		{
 			for (auto time_range : it->second)
@@ -567,18 +672,53 @@ bool ReservationTable::isConstrained(int curr_id, int next_id, int next_timestep
 }
 
 
+bool ReservationTable::isFootprintConstrained(int next_id, int next_timestep) const
+{
+    for (int loc : G.get_footprint_locations(next_id, current_footprint))
+    {
+	    auto it = ct.find(loc);
+	    if (it != ct.end())
+	    {
+		    for (auto time_range : it->second)
+		    {
+			    if (next_timestep >= time_range.first && next_timestep < time_range.second)
+				    return true;
+		    }
+	    }
+    }
+	return false;
+}
+
+
+bool ReservationTable::isFootprintConflicting(int next_id, int next_timestep) const
+{
+	if (next_timestep >= (int)cat.size())
+		return false;
+
+    for (int loc : G.get_footprint_locations(next_id, current_footprint))
+    {
+	    // check vertex constraints
+	    if (cat[next_timestep][loc])
+		    return true;
+    }
+    return false;
+}
+
+
 bool ReservationTable::isConflicting(int curr_id, int next_id, int next_timestep) const
 {
 	if (next_timestep >= (int)cat.size())
 		return false;
 
-	// check vertex constraints (being in next_id at next_timestep is disallowed)
-	if (cat[next_timestep][next_id])
-		return true;
-	// check edge constraints (the move from curr_id to next_id at next_timestep-1 is disallowed)
-	// which means that res_table is occupied with another agent for [curr_id,next_timestep] and [next_id,next_timestep-1]
-	// WRONG!
-	else if (curr_id != next_id && cat[next_timestep][curr_id] && cat[next_timestep - 1][next_id])
+    for (int loc : G.get_footprint_locations(next_id, current_footprint))
+    {
+	    // check vertex constraints
+	    if (cat[next_timestep][loc])
+		    return true;
+    }
+    
+	// check edge constraints
+	if (curr_id != next_id && cat[next_timestep][curr_id] && cat[next_timestep - 1][next_id])
 		return true;
 	else
 		return false;

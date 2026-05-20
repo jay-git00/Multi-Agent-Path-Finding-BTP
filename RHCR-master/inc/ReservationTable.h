@@ -1,6 +1,7 @@
 #pragma once
 #include "States.h"
 #include "BasicGraph.h"
+#include "Footprint.h"
 
 class ReservationTable
 {
@@ -11,6 +12,7 @@ public:
     int window;
     bool use_cat; // use conflict avoidance table
 	bool hold_endpoints = false;
+    Footprint current_footprint;
 
     bool prioritize_start;
     double runtime;
@@ -19,14 +21,25 @@ public:
 	void copy(const ReservationTable& other) {sit = other.sit; ct = other.ct; cat = other.cat; }
     void build(const vector<Path*>& paths,
                const list< tuple<int, int, int> >& initial_constraints,
-               const unordered_set<int>& high_priority_agents, int current_agent, int start_location);
+               const list< Constraint >& constraints, int current_agent,
+               const vector<Footprint>& footprints);
+    
     void build(const vector<Path>& paths,
                const list< tuple<int, int, int> >& initial_constraints,
-               int current_agent);
+               int current_agent,
+               const vector<Footprint>& footprints);
+
     void build(const vector<Path*>& paths,
                const list< tuple<int, int, int> >& initial_constraints,
-               const list< Constraint >& constraints, int current_agent);
-	void insertPath2CT(const Path& path); // insert the path to the constraint table
+               const unordered_set<int>& high_priority_agents, int current_agent, 
+               int start_location, const vector<Footprint>& footprints);
+
+    void build(const vector<Path>& paths,
+               const list< tuple<int, int, int> >& initial_constraints,
+               const unordered_set<int>& high_priority_agents, int current_agent, 
+               int start_location, const vector<Footprint>& footprints);
+    
+	void insertPath2CT(const Path& path, const Footprint& footprint); // insert the path to the constraint table
 	void print() const;
     void printCT(size_t location) const;
 
@@ -40,6 +53,10 @@ public:
 	// functions for state-time A*
 	bool isConstrained(int curr_id, int next_id, int next_timestep) const;
 	bool isConflicting(int curr_id, int next_id, int next_timestep) const;
+    
+    // Footprint-aware checks
+    bool isFootprintConstrained(int next_id, int next_timestep) const;
+    bool isFootprintConflicting(int next_id, int next_timestep) const;
 	int getHoldingTimeFromCT(int location) const;
     set<int> getConstrainedTimesteps(int location) const;
 
@@ -60,9 +77,9 @@ private:
 
     void insertConstraint2SIT(int location, int t_min, int t_max);
     void insertSoftConstraint2SIT(int location, int t_min, int t_max);
-    void insertConstraints4starts(const vector<Path*>& paths, int current_agent, int start_location);	
-	void insertPath2CAT(const Path& path); //  insert the path to the conflict avoidance table
-	void addInitialConstraints(const list< tuple<int, int, int> >& initial_constraints, int current_agent);
+    void insertConstraints4starts(const vector<Path*>& paths, int current_agent, int start_location, const vector<Footprint>& footprints);	
+	void insertPath2CAT(const Path& path, const Footprint& footprint); //  insert the path to the conflict avoidance table
+	void addInitialConstraints(const list< tuple<int, int, int> >& initial_constraints, int current_agent, const vector<Footprint>& footprints);
 	inline int getEdgeIndex(int from, int to) const {return (from + 1) * map_size + to; }
 	inline pair<int, int> getEdge(int index) const {return make_pair(index / map_size - 1, index % map_size); }
 

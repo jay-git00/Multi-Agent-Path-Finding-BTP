@@ -313,7 +313,7 @@ bool ECBS::find_path(ECBSNode* node, int agent)
         curr = curr->parent;
     }
 	rt.copy(initial_rt);
-    rt.build(paths, initial_constraints, constraints, agent);
+    rt.build(paths, initial_constraints, constraints, agent, agent_footprints);
 
     path = path_planner.run(G, starts[agent], goal_locations[agent], rt);
     rt.clear();
@@ -333,7 +333,7 @@ bool ECBS::find_path(ECBSNode* node, int agent)
         for (auto constraint : constraints)
             cout << constraint << endl;
 		rt.copy(initial_rt);
-        rt.build(paths, list< tuple<int, int, int> >(), constraints, agent);
+        rt.build(paths, list< tuple<int, int, int> >(), constraints, agent, agent_footprints);
         path = path_planner.run(G, starts[agent], goal_locations[agent], rt);
         rt.clear();
         exit(-1);
@@ -444,7 +444,7 @@ bool ECBS::generate_root_node()
     for (int i = 0; i < num_of_agents; i++)
     {
 		rt.copy(initial_rt);
-        rt.build(paths, initial_constraints, list<Constraint>(), i);
+        rt.build(paths, initial_constraints, list<Constraint>(), i, agent_footprints);
         Path path = path_planner.run(G, starts[i], goal_locations[i], rt);
         /*if (path.empty() && hold_endpoints && goal_locations[i].size() == 1)
         {
@@ -889,7 +889,7 @@ void ECBS::get_solution()
         /*if (k == 250)
             cout << solution[k] << endl;
         solution[k].clear();
-        rt.build(solution, initial_constraints, k);
+        rt.build(solution, initial_constraints, k, agent_footprints);
         vector< vector<double> > h_values(goal_locations[k].size());
         for (int j = 0; j < (int) goal_locations[k].size(); j++)
         {

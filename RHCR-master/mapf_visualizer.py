@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np
+import pandas as pd
 from matplotlib.patches import Rectangle, Circle
 from matplotlib.collections import LineCollection
 import matplotlib.colors as mcolors
@@ -8,13 +9,15 @@ import os
 import math
 
 class GeneralizedKivaVisualizer:
-    def __init__(self, map_file='kiva.map', results_file='my_results_paths.txt'):
+    def __init__(self, map_file='kiva.map', results_file='my_results_paths.txt', tasks_file=None):
         print("Loading Generalized Kiva Warehouse MAPF data...")
         
         # Load data
         self.map_data = self.load_kiva_map(map_file)
-        self.grid_height, self.grid_width = self.map_data.shape
+        self.grid_height,self.grid_width = self.map_data.shape
         self.raw_data = self.load_raw_data(results_file)
+        self.tasks_data = self.load_tasks_data(tasks_file)
+        self.results_dir = os.path.dirname(results_file) if results_file else ""
         self.solution = self.convert_to_solution()
         
         # **ADAPTIVE SETUP: Configure based on robot count**
@@ -29,15 +32,35 @@ class GeneralizedKivaVisualizer:
             'free_space': np.sum(self.map_data == '.')
         }
         
+        # Identify shelf corridors for visual semantics
+        self.shelf_corridors = set()
+        for y in range(self.grid_height):
+            for x in range(self.grid_width):
+                if self.map_data[y, x] == 'e':
+                    # Check neighbors for shelves
+                    for dy, dx in [(0,1), (0,-1), (1,0), (-1,0)]:
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < self.grid_height and 0 <= nx < self.grid_width:
+                            if self.map_data[ny, nx] == '@':
+                                self.shelf_corridors.add(y * self.grid_width + x)
+                                break
+        
+        print(f"DEBUG: Found {len(self.shelf_corridors)} shelf-adjacent corridors.")
+        print(f"DEBUG: Found {self.warehouse_stats['shelves']} shelves.")
+        
         # Setup visualization
         self.setup_adaptive_layout()
         self.current_timestep = 0
         self.max_timestep = max(len(path) for path in self.solution['agents'].values()) if self.solution['agents'] else 1
         
-        # Pre-render static elements
+        # Pre-render static elements (Shelves, Endpoints)
         self.setup_static_warehouse()
         self.agent_artists = []
         self.trail_artists = []
+        self.track_artists = []
+        
+        # Pre-render robot tracks (High Alpha = Clumsy, Low Alpha = Professional)
+        self.render_static_tracks()
         
         print(f"SUCCESS: Generalized visualizer ready for {self.num_agents} robots")
         print(f"Mode: {self.viz_mode} | Grid: {self.grid_width}x{self.grid_height}")
@@ -47,8 +70,8 @@ class GeneralizedKivaVisualizer:
         
         if self.num_agents <= 10:
             self.viz_mode = "DETAILED"
-            self.robot_size = 0.4
-            self.font_size = 10
+            self.robot_size = 0.8
+            self.font_size = 12 # Increased from 10
             self.trail_length = 12
             self.trail_alpha = 0.7
             self.show_individual_status = True
@@ -57,7 +80,7 @@ class GeneralizedKivaVisualizer:
             
         elif self.num_agents <= 30:
             self.viz_mode = "MEDIUM"
-            self.robot_size = 0.3
+            self.robot_size = 0.5
             self.font_size = 8
             self.trail_length = 8
             self.trail_alpha = 0.5
@@ -67,10 +90,10 @@ class GeneralizedKivaVisualizer:
             
         elif self.num_agents <= 100:
             self.viz_mode = "COMPACT"
-            self.robot_size = 0.25
-            self.font_size = 6
-            self.trail_length = 5
-            self.trail_alpha = 0.4
+            self.robot_size = 0.3
+            self.font_size = 7
+            self.trail_length = 20 # Increased for better track visibility
+            self.trail_alpha = 0.3
             self.show_individual_status = False
             self.show_robot_ids = True
             self.grid_detail = "low"
@@ -109,35 +132,36 @@ class GeneralizedKivaVisualizer:
             self.animation_interval = 600
 
     def setup_adaptive_colors(self):
-        """Generate colors that work for any number of robots"""
+        """Generate colors and state colors"""
         if self.num_agents <= 12:
-            # Use distinct colors for small groups
             self.colors = plt.cm.Set3(np.linspace(0, 1, max(self.num_agents, 1)))
         elif self.num_agents <= 50:
-            # Combine multiple colormaps
             colors = []
             maps = ['Set3', 'Dark2', 'Paired', 'Accent']
             per_map = math.ceil(self.num_agents / len(maps))
-            
             for i, cmap_name in enumerate(maps):
                 start_idx = i * per_map
                 end_idx = min((i + 1) * per_map, self.num_agents)
                 if start_idx < self.num_agents:
                     cmap = plt.cm.get_cmap(cmap_name)
                     colors.extend([cmap(j / per_map) for j in range(end_idx - start_idx)])
-            
             self.colors = np.array(colors[:self.num_agents])
         else:
-            # Use continuous color space for large numbers
             self.colors = plt.cm.rainbow(np.linspace(0, 1, self.num_agents))
+        
+        # State-based colors
+        self.color_idle = 'gray'
+        self.color_picking = 'lime'
+        self.color_collision_risk = 'red'
+        self.color_background = '#1a1a1a' # Dark theme support
 
     def setup_adaptive_layout(self):
         """Setup figure layout based on visualization mode"""
-        if self.viz_mode in ["DETAILED", "MEDIUM"]:
+        if self.viz_mode in ["DETAILED", "MEDIUM", "COMPACT"]:
             # Two-panel layout with info
-            self.fig, (self.ax_main, self.ax_info) = plt.subplots(1, 2, figsize=(20, 12))
+            self.fig, (self.ax_main, self.ax_info) = plt.subplots(1, 2, figsize=(22, 12), gridspec_kw={'width_ratios': [3, 1]})
             self.use_info_panel = True
-        elif self.viz_mode in ["COMPACT", "DENSE"]:
+        elif self.viz_mode in ["DENSE"]:
             # Main plot with minimal info overlay
             self.fig, self.ax_main = plt.subplots(1, 1, figsize=(16, 12))
             self.use_info_panel = False
@@ -178,25 +202,33 @@ class GeneralizedKivaVisualizer:
                 self.ax_main.axhline(y - 0.5, color='lightgray', linewidth=0.2, alpha=0.5)
 
     def render_detailed_warehouse(self):
-        """Full warehouse detail for ≤10 robots"""
+        """Full warehouse detail with clear roads"""
         for y in range(self.grid_height):
             for x in range(self.grid_width):
                 cell = self.map_data[y, x]
                 
                 if cell == '@':
-                    rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='saddlebrown', edgecolor='black', alpha=0.9)
+                    # High contrast SHELF: Dark Brown with thick border
+                    rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#4E342E', edgecolor='black', linewidth=2, alpha=1.0)
                     self.ax_main.add_patch(rect)
                 elif cell == 'e':
-                    rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='orange', edgecolor='darkorange', alpha=0.8)
+                    # High contrast CORRIDOR: Vivid Orange
+                    if (y * self.grid_width + x) in self.shelf_corridors:
+                         rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#FF6D00', edgecolor='#E65100', linewidth=1, alpha=0.9)
+                    else:
+                         rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#FF9800', alpha=0.6)
                     self.ax_main.add_patch(rect)
-                    self.ax_main.text(x, y, 'E', ha='center', va='center', fontweight='bold', fontsize=6, color='white')
                 elif cell == 'r':
                     rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='lightblue', edgecolor='blue', alpha=0.6)
                     self.ax_main.add_patch(rect)
                     self.ax_main.text(x, y, 'R', ha='center', va='center', fontweight='bold', fontsize=6, color='darkblue')
+                elif cell == '.':
+                    # Safety Floor: Light Gray with white markings
+                    rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#f5f5f5', edgecolor='white', linewidth=0.5, zorder=-2)
+                    self.ax_main.add_patch(rect)
 
     def render_medium_warehouse(self):
-        """Simplified warehouse for 10-30 robots"""
+        """Simplified warehouse with highlighted roads"""
         for y in range(self.grid_height):
             for x in range(self.grid_width):
                 cell = self.map_data[y, x]
@@ -210,20 +242,36 @@ class GeneralizedKivaVisualizer:
                 elif cell == 'r':
                     rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='lightblue', alpha=0.5)
                     self.ax_main.add_patch(rect)
+                elif cell == '.':
+                    # Standard warehouse floor
+                    rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#fafafa', edgecolor='#f0f0f0', linewidth=0.4, zorder=-2)
+                    self.ax_main.add_patch(rect)
 
     def render_basic_warehouse(self):
-        """Basic warehouse for 30-100 robots"""
-        # Batch render for performance
+        """Basic warehouse with high-contrast grid roads for clarity"""
         shelf_coords = np.where(self.map_data == '@')
         endpoint_coords = np.where(self.map_data == 'e')
-        robot_coords = np.where(self.map_data == 'r')
+        road_coords = np.where(self.map_data == '.')
+        home_coords = np.where(self.map_data == 'r')
         
-        for y, x in zip(shelf_coords[0], shelf_coords[1]):
-            rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='brown', alpha=0.6)
+        # Roads: Light gray tiles with distinct steel borders
+        for y, x in zip(road_coords[0], road_coords[1]):
+            rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#f0f2f5', edgecolor='#c1c9d2', linewidth=0.2, zorder=-2)
             self.ax_main.add_patch(rect)
             
+        # Home/Starting Boxes: Vibrant Visible Blue
+        for y, x in zip(home_coords[0], home_coords[1]):
+            rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#bbdefb', edgecolor='#1976d2', linewidth=0.8, zorder=-2)
+            self.ax_main.add_patch(rect)
+            
+        # Shelves: Heavy dark blocks
+        for y, x in zip(shelf_coords[0], shelf_coords[1]):
+            rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#4a4a4a', edgecolor='black', linewidth=0.8)
+            self.ax_main.add_patch(rect)
+            
+        # Endpoints: Vibrant orange targets
         for y, x in zip(endpoint_coords[0], endpoint_coords[1]):
-            rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='orange', alpha=0.5)
+            rect = Rectangle((x-0.5, y-0.5), 1, 1, facecolor='#ff6b00', edgecolor='darkred', linewidth=0.8)
             self.ax_main.add_patch(rect)
 
     def render_minimal_warehouse(self):
@@ -238,19 +286,77 @@ class GeneralizedKivaVisualizer:
             self.ax_main.scatter(endpoint_coords[1], endpoint_coords[0], c='orange', s=4, alpha=0.5, marker='s')
 
     def render_background_only(self):
-        """Background color coding for 500+ robots"""
-        # Create background image for maximum performance
-        background = np.ones((self.grid_height, self.grid_width, 3))
+        """Render the underlying map grid with warehouse aesthetics"""
+        self.ax_main.clear()
         
-        shelf_mask = self.map_data == '@'
-        endpoint_mask = self.map_data == 'e'
-        robot_mask = self.map_data == 'r'
+        # Colors for warehouse semantics
+        color_shelf = '#8B4513'     # SaddleBrown
+        color_corridor = '#FF8C00'  # DarkOrange (Barcode/Task scanning area)
+        color_free = '#F0F0F0'      # LightGrey
+        color_home = '#4682B4'      # SteelBlue (Robot rests)
+
+        for y in range(self.map_data.shape[0]):
+            for x in range(self.map_data.shape[1]):
+                cell = self.map_data[y, x]
+                rect_x, rect_y = self.location_to_xy(y * self.map_data.shape[1] + x)
+                
+                # Default style
+                cell_color = color_free
+                alpha = 0.5
+                zorder = 0
+                
+                if cell == '@': # Shelf
+                    cell_color = color_shelf
+                    alpha = 0.9
+                    zorder = 1
+                elif cell == 'e': # Corridor (Barcode/Tasks)
+                    cell_color = color_corridor
+                    alpha = 0.7
+                    zorder = 1
+                elif cell == 'r': # Home
+                    cell_color = color_home
+                    alpha = 0.6
+                
+                rect = Rectangle((rect_x - 0.5, rect_y - 0.5), 1, 1, 
+                                 facecolor=cell_color, alpha=alpha, 
+                                 edgecolor='#CCCCCC', linewidth=0.2, zorder=zorder)
+                self.ax_main.add_patch(rect)
+                
+                # Add "Shelf" visual hint
+                if cell == '@':
+                    self.ax_main.add_patch(Rectangle((rect_x - 0.4, rect_y - 0.4), 0.8, 0.8, 
+                                          fill=False, edgecolor='#603010', linewidth=0.5, zorder=2))
+
+        self.ax_main.set_xlim(-1, self.map_data.shape[1])
+        self.ax_main.set_ylim(-1, self.map_data.shape[0])
+        self.ax_main.set_aspect('equal')
+        self.ax_main.axis('off')
         
-        background[shelf_mask] = [0.6, 0.4, 0.2]  # Brown
-        background[endpoint_mask] = [1.0, 0.6, 0.0]  # Orange
-        background[robot_mask] = [0.7, 0.8, 1.0]  # Light blue
-        
-        self.ax_main.imshow(background, extent=[-0.5, self.grid_width-0.5, self.grid_height-0.5, -0.5], alpha=0.5)
+        # Add Legend for Map Semantics
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=color_shelf, edgecolor='#603010', label='Shelves (@) - Storage'),
+            Patch(facecolor=color_corridor, edgecolor='#CC7000', label='Corridors (e) - Task Scanning'),
+            Patch(facecolor=color_home, edgecolor='#306090', label='Robot Zones (r) - Home'),
+            Patch(facecolor=color_free, edgecolor='#CCCCCC', label='Travel Area (.)'),
+            Line2D([0], [0], marker='s', color='w', markerfacecolor=self.color_picking, 
+                   markersize=10, label='Robot Interaction (Loading/Unloading)')
+        ]
+        self.ax_main.legend(handles=legend_elements, loc='upper right', 
+                           bbox_to_anchor=(1.15, 1.0), fontsize=8, frameon=True, shadow=True)
+
+    def render_static_tracks(self):
+        """Draw faint 'rails' for the entire robot history"""
+        if self.viz_mode == "HEATMAP":
+            return
+        for agent_id, path in self.solution['agents'].items():
+            if len(path) > 1:
+                color = self.colors[agent_id % len(self.colors)]
+                tx, ty = zip(*path)
+                # Slightly more visible (0.1) for clarity, but still faint
+                line, = self.ax_main.plot(tx, ty, color=color, alpha=0.1, linewidth=0.5, zorder=0)
+                self.track_artists.append(line)
 
     def update_dynamic_elements(self, timestep):
         """Adaptive robot rendering based on count"""
@@ -266,61 +372,172 @@ class GeneralizedKivaVisualizer:
             return self.render_individual_robots(timestep)
 
     def render_individual_robots(self, timestep):
-        """Render robots individually"""
+        """Render robots individually with task indicators"""
         robot_status = []
         active_count = 0
         picking_count = 0
         completed_count = 0
+        total_tasks_completed = 0
         
         for agent_id, path in self.solution['agents'].items():
+            # Calculate tasks completed by this robot
+            robot_tasks = self.tasks_data.get(agent_id, [])
+            tasks_done = sum(1 for _, t in robot_tasks if 0 <= t <= timestep)
+            total_tasks_completed += tasks_done
+            
+            # Find current target goal (next task)
+            next_goal_xy = None
+            is_currently_picking = False
+            for loc_id, t in robot_tasks:
+                if t > timestep: # Next goal
+                    next_goal_xy = self.location_to_xy(loc_id)
+                    break
+                if t == timestep:
+                    is_currently_picking = True
+
             if timestep < len(path):
                 x, y = path[timestep]
-                color = self.colors[agent_id % len(self.colors)]
+                base_color = self.colors[agent_id % len(self.colors)]
                 
-                # Draw robot
-                circle = Circle((x, y), self.robot_size, facecolor=color, edgecolor='black', linewidth=1)
-                self.ax_main.add_patch(circle)
-                self.agent_artists.append(circle)
+                # Visual Intent: Dotted line to NEXT GOAL
+                if next_goal_xy and self.viz_mode in ["DETAILED", "MEDIUM"]:
+                    gx, gy = next_goal_xy
+                    line = self.ax_main.plot([x, gx], [y, gy], color=base_color, 
+                                           linestyle=':', linewidth=0.4, alpha=0.2)[0]
+                    self.trail_artists.append(line)
+
+                # Feedback: Color state
+                current_color = self.color_picking if is_currently_picking else base_color
                 
-                # Robot ID (if enabled)
+                # ── Realistic warehouse robot rendering (Addverb-style) ──────────
+                # Dimensions in grid units (1 unit = 1 grid cell)
+                body_w   = 0.78   # robot base width
+                body_h   = 0.95   # robot base height
+                mast_w   = 0.18   # vertical mast width
+                mast_h   = 0.55   # mast protrudes above body
+
+                robot_color   = tuple(base_color[:3]) if len(base_color) >= 3 else base_color
+                body_alpha    = 0.92 if is_currently_picking else 0.80
+
+                # 1. Shadow / footprint outline (shows physical extent) — light fill + dashed border
+                fp_size = getattr(self, 'robot_footprint_size', 1)
+                fp_half = fp_size / 2.0
+                
+                # Light color fill
+                fp_fill = Rectangle(
+                    (x - fp_half, y - fp_half), fp_size, fp_size,
+                    facecolor=robot_color, edgecolor='none',
+                    alpha=0.15, zorder=3
+                )
+                self.ax_main.add_patch(fp_fill)
+                self.agent_artists.append(fp_fill)
+
+                # Dashed border
+                fp_outline = Rectangle(
+                    (x - fp_half, y - fp_half), fp_size, fp_size,
+                    facecolor='none', edgecolor=robot_color,
+                    linewidth=1.2, linestyle='--', alpha=0.6, zorder=4
+                )
+                self.ax_main.add_patch(fp_outline)
+                self.agent_artists.append(fp_outline)
+
+                # 2. Robot base body (grey / silver — like real Addverb units)
+                body_rect = Rectangle(
+                    (x - body_w / 2, y - body_h / 2), body_w, body_h,
+                    facecolor='#BDBDBD', edgecolor='#424242',
+                    linewidth=1.0, alpha=body_alpha, zorder=6
+                )
+                self.ax_main.add_patch(body_rect)
+                self.agent_artists.append(body_rect)
+
+                # 3. Colored stripe on body front (agent ID color)
+                stripe = Rectangle(
+                    (x - body_w / 2, y - body_h / 2), body_w * 0.22, body_h,
+                    facecolor=robot_color, edgecolor='none',
+                    alpha=0.85, zorder=7
+                )
+                self.ax_main.add_patch(stripe)
+                self.agent_artists.append(stripe)
+
+                # 4. Vertical mast on top center (dark grey rod)
+                mast = Rectangle(
+                    (x - mast_w / 2, y + body_h / 2 - 0.05), mast_w, mast_h,
+                    facecolor='#37474F', edgecolor='none',
+                    alpha=0.9, zorder=7
+                )
+                self.ax_main.add_patch(mast)
+                self.agent_artists.append(mast)
+
+                # 5. Picking / active glow
+                if is_currently_picking:
+                    glow = Circle((x, y), 0.9, facecolor='gold', alpha=0.25, zorder=3)
+                    self.ax_main.add_patch(glow)
+                    self.agent_artists.append(glow)
+
+
+                # Persistent Waypoints: Small markers where tasks were done
+                for loc_id, t in robot_tasks:
+                    if t <= timestep:
+                        tx, ty = self.location_to_xy(loc_id)
+                        marker = Circle((tx, ty), self.robot_size * 0.3, 
+                                      facecolor=base_color, alpha=0.3, zorder=1)
+                        self.ax_main.add_patch(marker)
+                        self.agent_artists.append(marker)
+
+                # Robot ID + Task Flow Counter
                 if self.show_robot_ids and self.font_size > 0:
-                    text = self.ax_main.text(x, y, str(agent_id), ha='center', va='center',
-                                           fontweight='bold', fontsize=self.font_size, color='white')
+                    # Determine Task Type: In (to shelf) or Out (from shelf)
+                    task_type = "..."
+                    goal_loc_id = None
+                    if agent_id in self.tasks_data:
+                        for loc_id, t in self.tasks_data[agent_id]:
+                            if t >= timestep:
+                                goal_loc_id = loc_id
+                                break
+                    
+                    if goal_loc_id is not None:
+                        if goal_loc_id in self.shelf_corridors:
+                            task_type = "In" # Insource: to shelf
+                        else:
+                            task_type = "Out" # Outsource: from shelf
+                    
+                    label = f"R{agent_id}:{task_type}"
+                    if tasks_done > 0:
+                        label += f" ({tasks_done})"
+                    
+                    text = self.ax_main.text(x, y + self.robot_size * 2.0, label, ha='center', va='bottom',
+                                           fontweight='bold', fontsize=self.font_size-1, 
+                                           color='white', bbox=dict(boxstyle="round,pad=0.2", facecolor='black', alpha=0.5))
                     self.agent_artists.append(text)
-                
+
                 # Trail
                 if timestep > 0 and self.trail_length > 0:
                     trail_len = min(self.trail_length, timestep)
                     if trail_len > 1:
-                        trail_points = [path[t] for t in range(timestep-trail_len, timestep)]
+                        trail_points = [path[t] for t in range(max(0, timestep-trail_len), timestep+1)]
                         trail_x, trail_y = zip(*trail_points)
-                        line, = self.ax_main.plot(trail_x, trail_y, color=color, alpha=self.trail_alpha, linewidth=1)
+                        line, = self.ax_main.plot(trail_x, trail_y, color=base_color, 
+                                                 alpha=0.4, linewidth=1.2)
                         self.trail_artists.append(line)
                 
                 # Status tracking
                 cell_type = self.map_data[y, x] if 0 <= y < self.grid_height and 0 <= x < self.grid_width else '?'
                 if cell_type == 'e':
                     picking_count += 1
-                    if self.show_individual_status:
-                        robot_status.append(f"R{agent_id}: ({x},{y}) PICKING")
-                    # Highlight
-                    star = self.ax_main.plot(x, y, '*', color='yellow', markersize=max(6, 12-self.num_agents//10), markeredgecolor='black')[0]
-                    self.agent_artists.append(star)
+                    robot_status.append(f"R{agent_id}: At Endpoint ({tasks_done} total)")
                 else:
                     active_count += 1
-                    if self.show_individual_status:
-                        robot_status.append(f"R{agent_id}: ({x},{y}) ACTIVE")
+                    robot_status.append(f"R{agent_id}: Active (Tasks: {tasks_done})")
             else:
                 completed_count += 1
-                if self.show_individual_status:
-                    robot_status.append(f"R{agent_id}: COMPLETED")
+                robot_status.append(f"R{agent_id}: FINISHED ({tasks_done} tasks)")
         
-        # Update title with summary
-        summary = f"Active: {active_count} | Picking: {picking_count} | "
-        self.ax_main.set_title(f'Kiva Warehouse ({self.num_agents} robots) - {summary} - Step: {timestep}', 
-                              fontsize=12, fontweight='bold')
+        metrics = self.load_solver_metrics(timestep)
+        eff = total_tasks_completed/(timestep+1)
+        summary = f"Robots: {self.num_agents} | Tasks: {total_tasks_completed} | Throughput: {eff:.2f}/t"
+        self.ax_main.set_title(summary, fontsize=16, fontweight='bold', color='darkblue', pad=30)
         
-        return robot_status, {'active': active_count, 'picking': picking_count, 'completed': completed_count}
+        return robot_status, {'active': active_count, 'picking': picking_count, 'completed': completed_count, 'total_tasks': total_tasks_completed, 'metrics': metrics}
 
     def render_heatmap_mode(self, timestep):
         """Heatmap visualization for 500+ robots"""
@@ -360,28 +577,36 @@ class GeneralizedKivaVisualizer:
         self.ax_info.set_ylim(0, 10)
         self.ax_info.axis('off')
         
-        if self.viz_mode == "DETAILED":
-            # Full detail mode
-            info_text = f"""KIVA WAREHOUSE - DETAILED VIEW
-================================
-Grid: {self.grid_width}x{self.grid_height}
-Robots: {self.num_agents} (Mode: {self.viz_mode})
-
-Warehouse:
-• Shelves: {self.warehouse_stats['shelves']}
-• Endpoints: {self.warehouse_stats['endpoints']}
-• Robot Zones: {self.warehouse_stats['robot_zones']}
-
-Status Summary:
+        if self.viz_mode in ["DETAILED", "MEDIUM", "COMPACT"]:
+            metrics = summary_stats.get('metrics', {})
+            # Scientific Dashboard on the Sidebar
+            info_text = f"""--- SYSTEM DASHBOARD ---
+MODE: {self.viz_mode}
+AGENTS: {self.num_agents}
+STRATEGY: APS + CFNRS
+SAFETY: [ ACTIVE ]
+----------------------------
+SCIENTIFIC METRICS:
+• Nodes Exp: {int(metrics.get('nodes', 0)):,}
+• Wait Spots: {int(metrics.get('collisions', 0))}
+• Tick Time: {metrics.get('runtime', 0.0):.3f}s
+• Throughput: {summary_stats['total_tasks']/(timestep+1):.2f}/t
+• Path Gap: {int(metrics.get('cost', 0) - metrics.get('min_cost', 0))}
+----------------------------
+WAREHOUSE STATUS:
 • Active: {summary_stats['active']}
 • Picking: {summary_stats['picking']}
-• Completed: {summary_stats['completed']}
+• Finished: {summary_stats['completed']}
+• Jobs Done: {int(summary_stats.get('total_tasks', 0))}
 
-Timestep: {timestep}/{self.max_timestep-1}
+PROGRESS:
+• Timestep: {timestep}/{self.max_timestep-1}
+• Timeline: {timestep/self.max_timestep*100:.1f}%
+----------------------------
+INDIVIDUAL STATUS:
+{chr(10).join(robot_status[:10])}
+{f"... and {len(robot_status)-10} more" if len(robot_status)>10 else ""}"""
 
-Individual Robots:
-{chr(10).join(robot_status[:15])}
-{f"... and {len(robot_status) - 15} more" if len(robot_status) > 15 else ""}"""
 
         else:  # MEDIUM mode
             # Summary mode
@@ -393,7 +618,7 @@ Grid: {self.grid_width}x{self.grid_height}
 ROBOT STATUS:
 Active: {summary_stats['active']}
 Picking: {summary_stats['picking']}
-Completed: {summary_stats['completed']}
+Jobs Done: {int(summary_stats.get('total_tasks', 0))}
 
 PROGRESS:
 Timestep: {timestep}/{self.max_timestep-1}
@@ -516,6 +741,7 @@ Top 8 Robots:
     def load_raw_data(self, results_file):
         """Load RHCR results"""
         if not os.path.exists(results_file):
+            print(f"WARNING: Results file {results_file} not found. Using demo data.")
             return self.generate_demo_data()
         
         try:
@@ -549,6 +775,62 @@ Top 8 Robots:
             print(f"Error loading results: {e}")
             return self.generate_demo_data()
 
+    def load_solver_metrics(self, timestep):
+        """Load metrics from solver.csv for the current timestep"""
+        solver_csv = os.path.join(self.results_dir, "solver.csv")
+        if not os.path.exists(solver_csv):
+            return {}
+            
+        try:
+            # We want to find the line where column 9 (Timestep) matches our frame
+            df = pd.read_csv(solver_csv, header=None)
+            # Find closest row to current timestep
+            mask = df[9] <= timestep
+            if not mask.any():
+                return {}
+            row = df[mask].iloc[-1]
+            
+            return {
+                'cost': row[5],
+                'min_cost': row[6],
+                'nodes': row[3],
+                'collisions': row[8],
+                'runtime': row[0]
+            }
+        except Exception:
+            return {}
+
+    def load_tasks_data(self, tasks_file):
+        """Load finished tasks data from tasks.txt"""
+        if not tasks_file or not os.path.exists(tasks_file):
+            return {}
+        
+        tasks_data = {}
+        try:
+            with open(tasks_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            num_agents = int(lines[0].strip())
+            print(f"DEBUG: Loaded tasks for {num_agents} agents from {tasks_file}")
+            for agent_id in range(num_agents):
+                if agent_id + 1 < len(lines):
+                    line = lines[agent_id + 1].strip()
+                    parts = line.split(';')
+                    
+                    robot_tasks = []
+                    for p in parts:
+                        if p.strip():
+                            sub = p.split(',')
+                            if len(sub) >= 2:
+                                loc = int(sub[0])
+                                time = int(sub[1])
+                                robot_tasks.append((loc, time))
+                    tasks_data[agent_id] = robot_tasks
+            return tasks_data
+        except Exception as e:
+            print(f"Error loading tasks: {e}")
+            return {}
+
     def location_to_xy(self, location_id):
         """Convert location ID to x,y coordinates"""
         return location_id % self.grid_width, location_id // self.grid_width
@@ -569,9 +851,10 @@ Top 8 Robots:
         
         return solution
 
-    def run(self):
+    def run(self, show=True):
         """Start generalized visualization"""
         print(f"\nStarting Generalized Kiva Warehouse Visualization")
+        # ... (rest of prints)
         print(f"Robots: {self.num_agents} | Mode: {self.viz_mode}")
         print(f"Animation: {self.animation_interval}ms intervals")
         
@@ -584,7 +867,8 @@ Top 8 Robots:
         }
         
         print(f"Description: {mode_descriptions.get(self.viz_mode, 'Unknown mode')}")
-        print("Close window to exit")
+        if show:
+            print("Close window to exit")
         
         anim = animation.FuncAnimation(
             self.fig, self.animate, frames=self.max_timestep,
@@ -595,18 +879,36 @@ Top 8 Robots:
         )
         
         plt.tight_layout()
-        plt.show()
+        if show:
+            plt.show()
         return anim
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--map', type=str, default='kiva.map')
+    parser.add_argument('--result', type=str, default='my_results_paths.txt')
+    parser.add_argument('--tasks', type=str, default=None)
+    parser.add_argument('--save', type=str, default=None, help='Save animation to file (e.g. animation.mp4)')
+    parser.add_argument('--footprint', type=int, default=3, help='Size of robot footprint (e.g. 3 for 3x3)')
+    args = parser.parse_args()
+
     print("=" * 70)
     print("    GENERALIZED KIVA WAREHOUSE VISUALIZER")
     print("    Automatically adapts to any number of robots")
     print("=" * 70)
     
     try:
-        visualizer = GeneralizedKivaVisualizer('kiva.map', 'my_results_paths.txt')
-        visualizer.run()
+        visualizer = GeneralizedKivaVisualizer(args.map, args.result, args.tasks)
+        visualizer.robot_footprint_size = args.footprint # Set the footprint size
+        anim = visualizer.run(show=(args.save is None))
+        if args.save:
+            print(f"Saving animation to {args.save}...")
+            if args.save.endswith('.gif'):
+                anim.save(args.save, writer='pillow')
+            else:
+                anim.save(args.save, writer='ffmpeg', fps=10)
+            print("Save complete.")
     except Exception as e:
         print(f"Error: {e}")
         import traceback

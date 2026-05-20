@@ -31,6 +31,17 @@ bool WHCAStar::run(const vector<State>& starts,
     for (int i = 0; i < num_of_agents; i++)
         priorities[i] = i;
 
+    // Ensure initial_solution is properly sized (fixes crash in non-hold_endpoints mode)
+    if ((int)initial_solution.size() != num_of_agents)
+    {
+        initial_solution.resize(num_of_agents);
+        for (int i = 0; i < num_of_agents; i++)
+        {
+            if (initial_solution[i].empty())
+                initial_solution[i].emplace_back(starts[i]);
+        }
+    }
+
     runtime = (std::clock() - start) * 1.0  / CLOCKS_PER_SEC;
     while (runtime < time_limit)
     {
@@ -44,7 +55,7 @@ bool WHCAStar::run(const vector<State>& starts,
         for (int i : priorities)
         {
 			rt.copy(initial_rt);
-            rt.build(solution, initial_constraints, i);
+            rt.build(solution, initial_constraints, i, agent_footprints);
 			solution[i] = path_planner.run(G, starts[i], goal_locations[i], rt);
             solution_cost += path_planner.path_cost;
             rt.clear();

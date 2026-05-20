@@ -1,4 +1,4 @@
-# Install script for directory: C:/Users/apoor/Downloads/MAPF-with-multi-level-architecture/RHCR-master
+# Install script for directory: C:/Users/DILEEP/MATLAB/Projects/untitled/BTP/MAPF-with-multi-level-architecture/RHCR-master
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -12,7 +12,7 @@ if(NOT DEFINED CMAKE_INSTALL_CONFIG_NAME)
     string(REGEX REPLACE "^[^A-Za-z0-9_]+" ""
            CMAKE_INSTALL_CONFIG_NAME "${BUILD_TYPE}")
   else()
-    set(CMAKE_INSTALL_CONFIG_NAME "Debug")
+    set(CMAKE_INSTALL_CONFIG_NAME "RELEASE")
   endif()
   message(STATUS "Install configuration: \"${CMAKE_INSTALL_CONFIG_NAME}\"")
 endif()
@@ -34,13 +34,13 @@ endif()
 
 # Set path to fallback-tool for dependency-resolution.
 if(NOT DEFINED CMAKE_OBJDUMP)
-  set(CMAKE_OBJDUMP "C:/msys64/mingw64/bin/objdump.exe")
+  set(CMAKE_OBJDUMP "C:/msys-64/mingw64/bin/objdump.exe")
 endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
 if(CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "C:/Users/apoor/Downloads/MAPF-with-multi-level-architecture/RHCR-master/build/install_local_manifest.txt"
+  file(WRITE "C:/Users/DILEEP/MATLAB/Projects/untitled/BTP/MAPF-with-multi-level-architecture/RHCR-master/build/install_local_manifest.txt"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()
 if(CMAKE_INSTALL_COMPONENT)
@@ -56,6 +56,6 @@ else()
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "C:/Users/apoor/Downloads/MAPF-with-multi-level-architecture/RHCR-master/build/${CMAKE_INSTALL_MANIFEST}"
+  file(WRITE "C:/Users/DILEEP/MATLAB/Projects/untitled/BTP/MAPF-with-multi-level-architecture/RHCR-master/build/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()

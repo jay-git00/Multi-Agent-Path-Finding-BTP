@@ -43,6 +43,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/lifelong.dir/src/ReservationTable.cpp.obj.d"
   "CMakeFiles/lifelong.dir/src/SIPP.cpp.obj"
   "CMakeFiles/lifelong.dir/src/SIPP.cpp.obj.d"
+  "CMakeFiles/lifelong.dir/src/ScholarScheduler.cpp.obj"
+  "CMakeFiles/lifelong.dir/src/ScholarScheduler.cpp.obj.d"
   "CMakeFiles/lifelong.dir/src/SingleAgentSolver.cpp.obj"
   "CMakeFiles/lifelong.dir/src/SingleAgentSolver.cpp.obj.d"
   "CMakeFiles/lifelong.dir/src/SortingGraph.cpp.obj"

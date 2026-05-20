@@ -3,6 +3,7 @@
 #include "BasicSystem.h"
 #include "KivaGraph.h"
 #include "ReservationTable.h"
+#include "ScholarScheduler.h"
 
 #include <unordered_set>
 #include <vector>
@@ -15,12 +16,15 @@ public:
     KivaSystem(const KivaGrid& G, MAPFSolver& solver);
     ~KivaSystem();
 
+    ScholarScheduler scheduler; // CFNRS Logic
+
     void simulate(int simulation_time);
 
     // ====== Capacity & testing controls ======
     void setCapacityMode(bool on)                 { capacity_mode = on; }
     void setAgentCapacity(int c)                  { default_agent_capacity = (c > 0 ? c : 1); per_agent_capacity.clear(); }
     void setAgentCapacities(const std::vector<int>& caps) { per_agent_capacity = caps; }
+    void setAgentFootprints(const std::vector<Footprint>& fps) { agent_footprints = fps; }
     void setGivenGoals(const std::vector<std::vector<int>>& gg) { given_goals = gg; }
     void setRandomizeSequences(bool on)           { randomize_sequences = on; }
     void setRngSeed(unsigned s)                   { rng_seed = s; }
@@ -151,4 +155,9 @@ private:
     
     const KivaGrid& G;
     std::unordered_set<int> held_endpoints;
+
+    // Flow Semantics
+    std::vector<int> warehouse_endpoints;      // Peripheral Sources/Sinks
+    std::vector<int> shelf_adjacent_endpoints; // Shelf interaction corridors
+    mutable std::vector<int> task_count;       // Track tasks per agent for flow alternation
 };

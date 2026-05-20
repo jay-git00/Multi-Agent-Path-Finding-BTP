@@ -1,6 +1,7 @@
 #pragma once
 #include "common.h"
 #include "States.h"
+#include "Footprint.h"
 
 #define WEIGHT_MAX INT_MAX/2
 
@@ -27,6 +28,7 @@ public:
 
     bool valid_move(int loc, int dir) const {return (weights[loc][dir] < WEIGHT_MAX - 1); }
     int get_Manhattan_distance(int loc1, int loc2) const;
+    std::vector<int> get_footprint_locations(int center_loc, const Footprint& footprint) const;
     int move[4];
     void copy(const BasicGraph& copy);
     int get_direction(int from, int to) const;

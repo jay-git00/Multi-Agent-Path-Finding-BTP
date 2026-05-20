@@ -1,0 +1,12 @@
+map: ../kiva
+#drives: 3
+seed: 1775284911
+solver: ECBS
+time_limit: 60
+simulation_window: 1
+planning_window: 10
+simulation_time: 20
+robust: 0
+rotate: 0
+use_dummy_paths: 0
+hold_endpoints: 0

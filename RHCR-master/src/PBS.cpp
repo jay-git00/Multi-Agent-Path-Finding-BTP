@@ -3,6 +3,22 @@
 #include <iostream>
 #include "PathTable.h"
 
+bool has_footprint_overlap(const BasicGraph& G, int loc1, const Footprint& fp1, int loc2, const Footprint& fp2)
+{
+    if (loc1 < 0 || loc2 < 0) return false;
+    if (loc1 == loc2) return true; 
+    auto cells1 = G.get_footprint_locations(loc1, fp1);
+    auto cells2 = G.get_footprint_locations(loc2, fp2);
+    for (int c1 : cells1)
+    {
+        for (int c2 : cells2)
+        {
+            if (c1 == c2 && G.types[c1] != "Magic") return true;
+        }
+    }
+    return false;
+}
+
 
 void PBS::clear()
 {
@@ -98,7 +114,7 @@ void PBS::find_conflicts(list<Conflict>& conflicts, int a1, int a2)
 		{
 			int loc1 = paths[a1]->at(timestep).location;
 			int loc2 = paths[a2]->at(timestep).location;
-			if (loc1 == loc2 && G.types[loc1] != "Magic")
+			if (has_footprint_overlap(G, loc1, agent_footprints[a1], loc2, agent_footprints[a2]))
 			{
 				conflicts.emplace_back(a1, a2, loc1, -1, timestep);
 				return;
@@ -120,9 +136,9 @@ void PBS::find_conflicts(list<Conflict>& conflicts, int a1, int a2)
 			for (size_t timestep = min_path_length; timestep < paths[a2_]->size(); timestep++)
 			{
 				int loc2 = paths[a2_]->at(timestep).location;
-				if (loc1 == loc2 && G.types[loc1] != "Magic")
+				if (has_footprint_overlap(G, loc1, agent_footprints[a1_], loc2, agent_footprints[a2_]))
 				{
-					conflicts.emplace_back(a1_, a2_, loc1, -1, timestep); // It's at least a semi conflict		
+					conflicts.emplace_back(a1_, a2_, loc1, -1, (int)timestep); // It's at least a semi conflict		
 					return;
 				}
 			}
@@ -136,29 +152,39 @@ void PBS::find_conflicts(list<Conflict>& conflicts, int a1, int a2)
 		{
 			if (size2 <= timestep - k_robust)
 				break;
-			int loc = paths[a1]->at(timestep).location;
+			int loc1 = paths[a1]->at(timestep).location;
 			for (int i = max(0, timestep - k_robust); i <= min(timestep + k_robust, size2 - 1); i++)
 			{
-				if (loc == paths[a2]->at(i).location && G.types[loc] != "Magic")
+                int loc2 = paths[a2]->at(i).location;
+				if (has_footprint_overlap(G, loc1, agent_footprints[a1], loc2, agent_footprints[a2]))
 				{
-					conflicts.emplace_back(a1, a2, loc, -1, min(i, timestep)); // k-robust vertex conflict
+					conflicts.emplace_back(a1, a2, loc1, -1, min(i, timestep)); // k-robust vertex conflict
 					runtime_detect_conflicts += (double)(std::clock() - t) / CLOCKS_PER_SEC;
 					return;
 				}
 			}
-			if (k_robust == 0 && timestep < size1 - 1 && timestep < size2 - 1) // detect edge conflicts
+			if (k_robust == 0 && timestep < size1 - 1 && timestep < size2 - 1) // detect edge (swap) conflicts
+		{
+			int loc1_cur  = paths[a1]->at(timestep).location;
+			int loc2_cur  = paths[a2]->at(timestep).location;
+			int loc1_next = paths[a1]->at(timestep + 1).location;
+			int loc2_next = paths[a2]->at(timestep + 1).location;
+			// Classic point-agent swap: centers exchange
+			bool center_swap = (loc1_cur != loc2_cur &&
+								loc1_cur == loc2_next &&
+								loc2_cur == loc1_next);
+			// Footprint-aware: check if the footprints overlap during the move
+			// (robot A at t+1 overlaps robot B at t, or vice-versa) — catches large-body clips
+			bool fp_swap = (!center_swap &&
+							has_footprint_overlap(G, loc1_next, agent_footprints[a1], loc2_cur,  agent_footprints[a2]) &&
+							has_footprint_overlap(G, loc2_next, agent_footprints[a2], loc1_cur,  agent_footprints[a1]));
+			if (center_swap || fp_swap)
 			{
-				int loc1 = paths[a1]->at(timestep).location;
-				int loc2 = paths[a2]->at(timestep).location;
-				if (loc1 != loc2 && loc1 == paths[a2]->at(timestep + 1).location
-						 && loc2 == paths[a1]->at(timestep + 1).location)
-				{
-					conflicts.emplace_back(a1, a2, loc1, loc2, timestep + 1); // edge conflict
-					runtime_detect_conflicts += (double)(std::clock() - t) / CLOCKS_PER_SEC;
-					return;
-				}
+				conflicts.emplace_back(a1, a2, loc1_cur, loc2_cur, timestep + 1); // edge conflict
+				runtime_detect_conflicts += (double)(std::clock() - t) / CLOCKS_PER_SEC;
+				return;
 			}
-
+		}
 		}
     }
 	runtime_detect_conflicts += (double)(std::clock() - t) / CLOCKS_PER_SEC;
@@ -318,7 +344,7 @@ bool PBS::find_path(PBSNode* node, int agent)
     clock_t t = std::clock();
 	rt.copy(initial_rt);
     rt.build(paths, initial_constraints, node->priorities.get_reachable_nodes(agent),
-             agent, starts[agent].location);
+             agent, starts[agent].location, agent_footprints);
     runtime_get_higher_priority_agents += node->priorities.runtime;
 
     runtime_rt += (double)(std::clock() - t) / CLOCKS_PER_SEC;
@@ -567,7 +593,7 @@ bool PBS::generate_root_node()
         int start_location  = starts[i].location;
         clock_t t = std::clock();
 		rt.copy(initial_rt);
-        rt.build(paths, initial_constraints, dummy_start->priorities.get_reachable_nodes(i), i, start_location);
+        rt.build(paths, initial_constraints, dummy_start->priorities.get_reachable_nodes(i), i, start_location, agent_footprints);
         runtime_get_higher_priority_agents += dummy_start->priorities.runtime;
         runtime_rt += (double)(std::clock() - t) / CLOCKS_PER_SEC;
         vector< vector<double> > h_values(goal_locations[i].size());
@@ -1012,7 +1038,7 @@ void PBS::get_solution()
         /*if (k == 250)
             cout << solution[k] << endl;
         solution[k].clear();
-        rt.build(solution, initial_constraints, k);
+        rt.build(solution, initial_constraints, k, agent_footprints);
         vector< vector<double> > h_values(goal_locations[k].size());
         for (int j = 0; j < (int) goal_locations[k].size(); j++)
         {

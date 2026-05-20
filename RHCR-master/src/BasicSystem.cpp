@@ -186,7 +186,7 @@ void BasicSystem::update_start_locations()
 }
 
 
-void BasicSystem::update_paths(const std::vector<Path*>& MAPF_paths, int max_timestep = INT_MAX)
+void BasicSystem::update_paths(const std::vector<Path*>& MAPF_paths, int max_timestep)
 {
     for (int k = 0; k < num_of_drives; k++)
     {
@@ -205,7 +205,7 @@ void BasicSystem::update_paths(const std::vector<Path*>& MAPF_paths, int max_tim
     }
 }
 
-void BasicSystem::update_paths(const std::vector<Path>& MAPF_paths, int max_timestep = INT_MAX)
+void BasicSystem::update_paths(const std::vector<Path>& MAPF_paths, int max_timestep)
 {
     for (int k = 0; k < num_of_drives; k++)
     {
@@ -576,13 +576,17 @@ void BasicSystem::solve()
 		// predict travel time
 		unordered_map<int, double> travel_times;
 		update_travel_times(solver.travel_times);
+		// Footprint sync
+		solver.agent_footprints = agent_footprints;
 
 		bool sol = solver.run(starts, goal_locations, time_limit);
 		update_paths(solver.solution);
 	}
 	else if (solver.get_name() == "WHCA")
 	{
-		update_initial_constraints(solver.initial_constraints);
+    update_initial_constraints(solver.initial_constraints);
+    // Footprint sync
+    solver.agent_footprints = agent_footprints;
 
 		bool sol = solver.run(starts, goal_locations, time_limit);
 		if (sol)
@@ -599,6 +603,7 @@ void BasicSystem::solve()
 	 {
 		 //PriorityGraph initial_priorities;
 		 update_initial_constraints(solver.initial_constraints);
+         solver.agent_footprints = agent_footprints;
 
 		 // solve
 		 if (hold_endpoints || useDummyPaths)
@@ -623,7 +628,7 @@ void BasicSystem::solve()
                  }
 				 if (p == new_agents.end() || *p != i)
 				 {
-					 solver.initial_rt.insertPath2CT(planned_paths[i]);
+ 					 solver.initial_rt.insertPath2CT(planned_paths[i], agent_footprints[i]);
 				 }
 				 else
 					 ++p;
@@ -814,6 +819,7 @@ bool BasicSystem::load_records()
 			{
 				finished_tasks[k].emplace_back(loc, time);
 				timestep = max(timestep, time);
+				num_of_tasks++; // Count loaded tasks
 			}
 			else
 			{

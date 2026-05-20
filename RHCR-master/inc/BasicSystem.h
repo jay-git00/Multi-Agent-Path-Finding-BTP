@@ -1,5 +1,6 @@
 #pragma once
 #include "BasicGraph.h"
+#include "Footprint.h"
 #include "States.h"
 #include "PriorityGraph.h"
 #include "PBS.h"
@@ -31,6 +32,8 @@ public:
     // params for drive model
     bool consider_rotation;
     int k_robust;
+    std::vector<Footprint> agent_footprints;
+    Footprint default_footprint;
 
     BasicSystem(const BasicGraph& G, MAPFSolver& solver);
     ~BasicSystem();
@@ -67,8 +70,8 @@ public:
     // update
     void update_start_locations();
     void update_travel_times(unordered_map<int, double>& travel_times);
-    void update_paths(const std::vector<Path*>& MAPF_paths, int max_timestep);
-    void update_paths(const std::vector<Path>& MAPF_paths, int max_timestep);
+    void update_paths(const std::vector<Path*>& MAPF_paths, int max_timestep = INT_MAX);
+    void update_paths(const std::vector<Path>& MAPF_paths, int max_timestep = INT_MAX);
     void update_initial_paths(vector<Path>& initial_paths) const;
     void update_initial_constraints(list< tuple<int, int, int> >& initial_constraints) const;
     

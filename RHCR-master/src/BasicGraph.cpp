@@ -256,6 +256,23 @@ int BasicGraph::get_Manhattan_distance(int loc1, int loc2) const
     return abs(loc1 / cols - loc2 / cols) + abs(loc1 % cols - loc2 % cols);
 }
 
+std::vector<int> BasicGraph::get_footprint_locations(int center_loc, const Footprint& footprint) const
+{
+    std::vector<int> locations;
+    int r = center_loc / cols;
+    int c = center_loc % cols;
+    for (auto offset : footprint.offsets)
+    {
+        int next_r = r + offset.first;
+        int next_c = c + offset.second;
+        if (next_r >= 0 && next_r < rows && next_c >= 0 && next_c < cols)
+        {
+            locations.push_back(next_r * cols + next_c);
+        }
+    }
+    return locations;
+}
+
 
 void BasicGraph::copy(const BasicGraph& copy)
 {
