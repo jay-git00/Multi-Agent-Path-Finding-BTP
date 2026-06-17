@@ -1,4 +1,4 @@
-﻿#include "KivaSystem.h"
+#include "KivaSystem.h"
 #include "SortingSystem.h"
 #include "OnlineSystem.h"
 #include "BeeSystem.h"
@@ -135,6 +135,9 @@ int main(int argc, char** argv)
 		("model", po::value<string>()->default_value("BASELINE"), "proposed models (BASELINE, APS_CFNRS)")
 		("capacity", po::value<int>()->default_value(1), "agent task capacity for APS")
 		("footprint", po::value<int>()->default_value(3), "robot footprint size (1: point, 3: 3x3 square)")
+		("footprint_shape", po::value<string>()->default_value("square"), "footprint shape (square, rect)")
+		("footprint_width", po::value<int>()->default_value(1), "footprint width for rect shape")
+		("footprint_height", po::value<int>()->default_value(3), "footprint height for rect shape")
 		;
 	clock_t start_time = clock();
 	po::variables_map vm;
@@ -197,8 +200,19 @@ int main(int argc, char** argv)
         system.setMetricsVerbose(true);
         
         int fpsize = vm["footprint"].as<int>();
-        std::vector<Footprint> footprints(system.num_of_drives, Footprint::Square(fpsize));
+        string fp_shape = vm["footprint_shape"].as<string>();
+        std::vector<Footprint> footprints;
+        if (fp_shape == "rect") {
+            int fp_w = vm["footprint_width"].as<int>();
+            int fp_h = vm["footprint_height"].as<int>();
+            footprints.assign(system.num_of_drives, Footprint::Rectangle(fp_w, fp_h));
+            cout << "Using RECTANGULAR footprint: " << fp_w << "x" << fp_h << endl;
+        } else {
+            footprints.assign(system.num_of_drives, Footprint::Square(fpsize));
+            cout << "Using SQUARE footprint: " << fpsize << "x" << fpsize << endl;
+        }
         system.setAgentFootprints(footprints);
+        G.setActiveFootprint(footprints[0]);  // Enable static-obstacle footprint validation
 
 		G.preprocessing(system.consider_rotation);
 		system.simulate(vm["simulation_time"].as<int>());

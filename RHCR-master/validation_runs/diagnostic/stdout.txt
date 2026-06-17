@@ -1,0 +1,5 @@
+*** Loading map ***
+Map size: 99x138 with 4320 endpoints and 1728 home stations.
+Done! (0 s)
+Using SQUARE footprint: 3x3
+*** PreProcessing map ***

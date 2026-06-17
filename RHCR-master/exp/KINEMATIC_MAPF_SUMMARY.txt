@@ -1,0 +1,91 @@
+==============================================================================
+   KINEMATIC MAPF - SIMULATION RESULTS SUMMARY
+   BTP Project: Multi-Agent Path Finding with Kinematic Constraints
+==============================================================================
+
+1. OBJECTIVE
+------------
+Evaluate the feasibility of planning collision-free paths for robots with
+large rigid-body footprints (3x1, 5x1, 7x1, 9x1) in a Kiva-style warehouse,
+using the K-PBS (Kinematic Priority-Based Search) solver with SIPP.
+
+2. MAPS USED
+-------------
+  a) kiva.map (Original)  : 33x46 grid, 1-cell wide corridors
+  b) kiva_scaled_3x.map   : 99x138 grid, 3-cell wide corridors (3x upscaled)
+     - Scaling was necessary because the original 1-cell corridors are
+       physically too narrow for a 3x1+ rigid body to rotate at intersections.
+
+3. SIMULATION PARAMETERS
+--------------------------
+  - Agents: 5
+  - Simulation Time: 100 timesteps
+  - Simulation Window: 5
+  - Planning Window: 10
+  - Solver: PBS (Priority-Based Search)
+  - Single-Agent Solver: SIPP (Safe Interval Path Planning)
+  - Rotation: Enabled (4 cardinal orientations: N, E, S, W)
+
+4. QUANTIFIED THROUGHPUT RESULTS (5 agents, 100 timesteps, scaled 3x map)
+---------------------------------------------------------------------------
+  Footprint    | Tasks Completed | Throughput (tasks/ts) | Status
+  -------------|-----------------|----------------------|--------
+  1x1 (Point)  |       5         |       0.050          | Success
+  3x1 (Small)  |      10         |       0.099          | Success
+  5x1 (Medium) |       5         |       0.050          | Success
+  7x1 (Large)  |       5         |       0.050          | Success
+  9x1 (XLarge) |       5         |       0.050          | Success
+
+5. GIF FILES INCLUDED IN THIS ZIP
+-----------------------------------
+  BEFORE MAP SCALING (Original kiva.map, 33x46):
+    - kpbs_1x3_simulation.gif    : 1x3 footprint on original map
+    - kpbs_3x1_simulation.gif    : 3x1 footprint on original map
+      (These show the rack-clipping problem on narrow corridors)
+
+  AFTER MAP SCALING (kiva_scaled_3x.map, 99x138):
+    - kpbs_3x1_smooth.gif        : 3x1 rigid body, smooth rotation
+    - kpbs_3x1_worm.gif          : 3x1 worm/trail model (experimental)
+    - kpbs_5x1_smooth.gif        : 5x1 rigid body, smooth rotation
+    - kpbs_5x1_worm.gif          : 5x1 worm/trail model (experimental)
+    - kpbs_7x1_smooth.gif        : 7x1 rigid body, smooth rotation
+    - kpbs_9x1_worm.gif          : 9x1 worm/trail model (experimental)
+
+6. KEY FINDINGS & LIMITATIONS
+-------------------------------
+  a) MAP SCALING WORKS: The 3x upscale successfully provides physical
+     clearance for large footprints to navigate without corridor-width
+     violations. All footprints up to 9x1 find valid paths.
+
+  b) CRITICAL BUG - STATIC OBSTACLE VALIDATION:
+     The C++ solver (BasicGraph.cpp) correctly uses the Nx1 footprint
+     for agent-to-agent collision detection via PBS constraints.
+     HOWEVER, for static obstacle avoidance (shelves marked '@'),
+     it only checks the CENTER cell of the robot.
+
+     This means: when a 5x1 robot rotates at an intersection, the
+     planner does NOT verify whether the 2 trailing cells of the body
+     overlap with adjacent shelf cells. Visually, this results in the
+     robot's body "clipping through" the brown racks.
+
+  c) ROTATION REALISM:
+     The solver models rotation as an instantaneous in-place action
+     (same cell, orientation changes by ±90° in 1 timestep). This is
+     a standard discrete MAPF convention, but looks unrealistic for
+     long rigid bodies. Smooth visual interpolation was implemented
+     but does not change the underlying discrete planning model.
+
+7. PROPOSED NEXT STEPS
+------------------------
+  1. PATCH BasicGraph::get_neighbors() in C++ to reject any state where
+     the rotated footprint overlaps with static obstacles ('@' cells).
+     This will produce physically accurate throughput degradation curves.
+
+  2. Run batch benchmarks with the patched solver across footprint sizes
+     to generate the true kinematic throughput vs. body-size plot for
+     the thesis.
+
+  3. Design a custom warehouse map with wider turning areas specifically
+     optimized for kinematic robots (instead of simple uniform scaling).
+
+==============================================================================

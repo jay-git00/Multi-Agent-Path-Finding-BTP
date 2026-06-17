@@ -3,6 +3,7 @@ import matplotlib.animation as animation
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Rectangle, Circle
+from matplotlib.transforms import Affine2D
 from matplotlib.collections import LineCollection
 import matplotlib.colors as mcolors
 import os
@@ -51,6 +52,9 @@ class GeneralizedKivaVisualizer:
         # Setup visualization
         self.setup_adaptive_layout()
         self.current_timestep = 0
+        self.frames_per_step = 1   # Strict 1-to-1 timesteps, no intermediate frames
+        self.fp_width = 3   # default, overridden from CLI
+        self.fp_height = 1
         self.max_timestep = max(len(path) for path in self.solution['agents'].values()) if self.solution['agents'] else 1
         
         # Pre-render static elements (Shelves, Endpoints)
@@ -123,13 +127,13 @@ class GeneralizedKivaVisualizer:
         
         # **ADAPTIVE ANIMATION SPEED**
         if self.num_agents <= 10:
-            self.animation_interval = 300
+            self.animation_interval = 200   # 5 discrete steps per second
         elif self.num_agents <= 50:
-            self.animation_interval = 400
+            self.animation_interval = 250
         elif self.num_agents <= 200:
-            self.animation_interval = 500
+            self.animation_interval = 300
         else:
-            self.animation_interval = 600
+            self.animation_interval = 400
 
     def setup_adaptive_colors(self):
         """Generate colors and state colors"""
@@ -291,8 +295,8 @@ class GeneralizedKivaVisualizer:
         
         # Colors for warehouse semantics
         color_shelf = '#8B4513'     # SaddleBrown
-        color_corridor = '#FF8C00'  # DarkOrange (Barcode/Task scanning area)
-        color_free = '#F0F0F0'      # LightGrey
+        color_accessible_rack = '#FF8C00'  # DarkOrange (Accessible Racks/Tasks)
+        color_free = '#F0F0F0'      # LightGrey (Corridors/Travel)
         color_home = '#4682B4'      # SteelBlue (Robot rests)
 
         for y in range(self.map_data.shape[0]):
@@ -309,8 +313,8 @@ class GeneralizedKivaVisualizer:
                     cell_color = color_shelf
                     alpha = 0.9
                     zorder = 1
-                elif cell == 'e': # Corridor (Barcode/Tasks)
-                    cell_color = color_corridor
+                elif cell == 'e': # Accessible Rack (Tasks)
+                    cell_color = color_accessible_rack
                     alpha = 0.7
                     zorder = 1
                 elif cell == 'r': # Home
@@ -336,10 +340,10 @@ class GeneralizedKivaVisualizer:
         from matplotlib.lines import Line2D
         from matplotlib.patches import Patch
         legend_elements = [
-            Patch(facecolor=color_shelf, edgecolor='#603010', label='Shelves (@) - Storage'),
-            Patch(facecolor=color_corridor, edgecolor='#CC7000', label='Corridors (e) - Task Scanning'),
+            Patch(facecolor=color_shelf, edgecolor='#603010', label='Solid Racks (@) - Inaccessible Storage'),
+            Patch(facecolor=color_accessible_rack, edgecolor='#CC7000', label='Accessible Racks (e) - Task Locations'),
             Patch(facecolor=color_home, edgecolor='#306090', label='Robot Zones (r) - Home'),
-            Patch(facecolor=color_free, edgecolor='#CCCCCC', label='Travel Area (.)'),
+            Patch(facecolor=color_free, edgecolor='#CCCCCC', label='Corridors/Travel Area (.)'),
             Line2D([0], [0], marker='s', color='w', markerfacecolor=self.color_picking, 
                    markersize=10, label='Robot Interaction (Loading/Unloading)')
         ]
@@ -353,7 +357,8 @@ class GeneralizedKivaVisualizer:
         for agent_id, path in self.solution['agents'].items():
             if len(path) > 1:
                 color = self.colors[agent_id % len(self.colors)]
-                tx, ty = zip(*path)
+                tx = [p[0] for p in path]
+                ty = [p[1] for p in path]
                 # Slightly more visible (0.1) for clarity, but still faint
                 line, = self.ax_main.plot(tx, ty, color=color, alpha=0.1, linewidth=0.5, zorder=0)
                 self.track_artists.append(line)
@@ -371,122 +376,219 @@ class GeneralizedKivaVisualizer:
         else:
             return self.render_individual_robots(timestep)
 
-    def render_individual_robots(self, timestep):
-        """Render robots individually with task indicators"""
+    def render_individual_robots(self, float_timestep):
+        """Render robots as realistic rigid bodies (Addverb style)."""
+        timestep = int(float_timestep)
+        progress = float_timestep - timestep
         robot_status = []
         active_count = 0
         picking_count = 0
         completed_count = 0
         total_tasks_completed = 0
-        
+
+        # Base footprint dimensions
+        fp_w_base = self.fp_width
+        fp_h_base = self.fp_height
+
         for agent_id, path in self.solution['agents'].items():
-            # Calculate tasks completed by this robot
+            # Task bookkeeping
             robot_tasks = self.tasks_data.get(agent_id, [])
             tasks_done = sum(1 for _, t in robot_tasks if 0 <= t <= timestep)
             total_tasks_completed += tasks_done
-            
-            # Find current target goal (next task)
+
             next_goal_xy = None
             is_currently_picking = False
             for loc_id, t in robot_tasks:
-                if t > timestep: # Next goal
+                if t > timestep:
                     next_goal_xy = self.location_to_xy(loc_id)
                     break
                 if t == timestep:
                     is_currently_picking = True
 
             if timestep < len(path):
-                x, y = path[timestep]
+                x, y, theta = path[timestep]
+                if timestep + 1 < len(path):
+                    nx, ny, ntheta = path[timestep + 1]
+                    x = x + (nx - x) * progress
+                    y = y + (ny - y) * progress
+                    
+                    diff = (ntheta - theta) % 4
+                    if diff == 3: diff = -1
+                    theta = theta + diff * progress
+
                 base_color = self.colors[agent_id % len(self.colors)]
-                
-                # Visual Intent: Dotted line to NEXT GOAL
+                robot_color = tuple(base_color[:3]) if len(base_color) >= 3 else base_color
+
+                # Dotted line to next goal
                 if next_goal_xy and self.viz_mode in ["DETAILED", "MEDIUM"]:
                     gx, gy = next_goal_xy
-                    line = self.ax_main.plot([x, gx], [y, gy], color=base_color, 
-                                           linestyle=':', linewidth=0.4, alpha=0.2)[0]
+                    line = self.ax_main.plot(
+                        [x, gx], [y, gy], color=base_color,
+                        linestyle=':', linewidth=0.4, alpha=0.2)[0]
                     self.trail_artists.append(line)
 
-                # Feedback: Color state
-                current_color = self.color_picking if is_currently_picking else base_color
+                # Rigid Body dimensions
+                body_w = fp_w_base * 0.92
+                body_h = fp_h_base * 0.92
+                mast_w = min(body_w, body_h) * 0.40
+                mast_h = max(body_w, body_h) * 0.30
+
+                body_alpha = 0.95 if is_currently_picking else 0.85
+                body_color = '#8A9A9D'
+                stripe_color = robot_color
                 
-                # ── Realistic warehouse robot rendering (Addverb-style) ──────────
-                # Dimensions in grid units (1 unit = 1 grid cell)
-                body_w   = 0.78   # robot base width
-                body_h   = 0.95   # robot base height
-                mast_w   = 0.18   # vertical mast width
-                mast_h   = 0.55   # mast protrudes above body
+                shape = getattr(self, 'agent_shape', 'rect')
+                # For sideloader, we CANNOT use simple Affine2D rotation because the distance
+                # between the fork (center) and the body changes dynamically!
+                if shape == 'sideloader':
+                    # Body is ALWAYS 3 wide, 1 high
+                    body_w = self.robot_size * 3
+                    body_h = self.robot_size * 1
+                    
+                    mast_w = body_w * 0.05
+                    mast_h = body_h * 0.1
+                    
+                    if theta == 0 or theta == 2:
+                        rect_x = x - body_w / 2
+                        rect_y = y - body_h / 2
+                        mast_x = x - mast_w / 2
+                        mast_y = y - mast_h / 2
+                    elif theta == 1:
+                        # South: body is North of the fork (y - 1).
+                        rect_x = x - body_w / 2
+                        rect_y = (y - 1) - body_h / 2
+                        # Draw mast extending from body to fork
+                        mast_h = 1.0 # span the gap
+                        mast_x = x - mast_w / 2
+                        mast_y = (y - 1)
+                    elif theta == 3:
+                        # North: body is South of the fork (y + 1).
+                        rect_x = x - body_w / 2
+                        rect_y = (y + 1) - body_h / 2
+                        # Draw mast extending from body to fork
+                        mast_h = 1.0
+                        mast_x = x - mast_w / 2
+                        mast_y = y
+                    
+                    stripe_w = body_w * 0.15
+                    stripe_h = body_h * 0.3
+                    # The stripe represents the fork, which is ALWAYS at (x,y)
+                    stripe_x = x - stripe_w / 2
+                    stripe_y = y - stripe_h / 2
+                    
+                    body_rect = Rectangle(
+                        (rect_x, rect_y), body_w, body_h,
+                        facecolor=body_color, alpha=body_alpha, zorder=4,
+                        edgecolor='black', linewidth=1.5
+                    )
+                    
+                    stripe = Rectangle(
+                        (stripe_x, stripe_y), stripe_w, stripe_h,
+                        facecolor=stripe_color, zorder=5
+                    )
+                    
+                    mast = Rectangle(
+                        (mast_x, mast_y), mast_w, mast_h,
+                        facecolor='#222222', zorder=3
+                    )
+                    
+                    self.ax_main.add_patch(body_rect)
+                    self.ax_main.add_patch(stripe)
+                    self.ax_main.add_patch(mast)
+                    self.agent_artists.append(body_rect)
+                    self.agent_artists.append(stripe)
+                    self.agent_artists.append(mast)
+                    continue # Skip the Affine2D rotation below
 
-                robot_color   = tuple(base_color[:3]) if len(base_color) >= 3 else base_color
-                body_alpha    = 0.92 if is_currently_picking else 0.80
+                if shape == 'forklift':
+                    # (x,y) is the front (East). Body trails West.
+                    rect_x = x - body_w
+                    rect_y = y - body_h / 2
+                    
+                    stripe_w = body_w * 0.15
+                    stripe_h = body_h
+                    stripe_x = x - stripe_w
+                    stripe_y = y - stripe_h / 2
+                    
+                    mast_x = x - mast_w
+                    mast_y = y - mast_h / 2
+                else:
+                    rect_x = x - body_w / 2
+                    rect_y = y - body_h / 2
+                    
+                    stripe_w = body_w * 0.15
+                    stripe_h = body_h
+                    stripe_x = x - body_w / 2
+                    stripe_y = y - stripe_h / 2
+                    
+                    mast_x = x - mast_w / 2
+                    mast_y = y - mast_h / 2
 
-                # 1. Shadow / footprint outline (shows physical extent) — light fill + dashed border
-                fp_size = getattr(self, 'robot_footprint_size', 1)
-                fp_half = fp_size / 2.0
-                
-                # Light color fill
-                fp_fill = Rectangle(
-                    (x - fp_half, y - fp_half), fp_size, fp_size,
-                    facecolor=robot_color, edgecolor='none',
-                    alpha=0.15, zorder=3
-                )
-                self.ax_main.add_patch(fp_fill)
-                self.agent_artists.append(fp_fill)
-
-                # Dashed border
-                fp_outline = Rectangle(
-                    (x - fp_half, y - fp_half), fp_size, fp_size,
-                    facecolor='none', edgecolor=robot_color,
-                    linewidth=1.2, linestyle='--', alpha=0.6, zorder=4
-                )
-                self.ax_main.add_patch(fp_outline)
-                self.agent_artists.append(fp_outline)
-
-                # 2. Robot base body (grey / silver — like real Addverb units)
                 body_rect = Rectangle(
-                    (x - body_w / 2, y - body_h / 2), body_w, body_h,
-                    facecolor='#BDBDBD', edgecolor='#424242',
-                    linewidth=1.0, alpha=body_alpha, zorder=6
+                    (rect_x, rect_y), body_w, body_h,
+                    facecolor=body_color, alpha=body_alpha, zorder=4,
+                    edgecolor='black', linewidth=1.5
                 )
-                self.ax_main.add_patch(body_rect)
-                self.agent_artists.append(body_rect)
-
-                # 3. Colored stripe on body front (agent ID color)
+                
                 stripe = Rectangle(
-                    (x - body_w / 2, y - body_h / 2), body_w * 0.22, body_h,
-                    facecolor=robot_color, edgecolor='none',
-                    alpha=0.85, zorder=7
+                    (stripe_x, stripe_y), stripe_w, stripe_h,
+                    facecolor=stripe_color, zorder=5
                 )
-                self.ax_main.add_patch(stripe)
-                self.agent_artists.append(stripe)
-
-                # 4. Vertical mast on top center (dark grey rod)
+                
                 mast = Rectangle(
-                    (x - mast_w / 2, y + body_h / 2 - 0.05), mast_w, mast_h,
-                    facecolor='#37474F', edgecolor='none',
-                    alpha=0.9, zorder=7
+                    (mast_x, mast_y), mast_w, mast_h,
+                    facecolor='#222222', zorder=5
                 )
+                
+                self.ax_main.add_patch(body_rect)
+                self.ax_main.add_patch(stripe)
                 self.ax_main.add_patch(mast)
+                self.agent_artists.append(body_rect)
+                self.agent_artists.append(stripe)
                 self.agent_artists.append(mast)
 
-                # 5. Picking / active glow
-                if is_currently_picking:
-                    glow = Circle((x, y), 0.9, facecolor='gold', alpha=0.25, zorder=3)
+                # Smooth rotation
+                angle_deg = 90.0 * theta
+                t_rot = Affine2D().rotate_deg_around(x, y, angle_deg) + self.ax_main.transData
+                body_rect.set_transform(t_rot)
+                stripe.set_transform(t_rot)
+                mast.set_transform(t_rot)
+
+                # Picking glow / Task Completion Signal
+                is_just_completed = False
+                for loc_id, t in robot_tasks:
+                    # If task was completed in the last 2 timesteps
+                    if t <= timestep <= t + 2:
+                        tx, ty = self.location_to_xy(loc_id)
+                        # Check if robot is physically near the endpoint
+                        if abs(x - tx) + abs(y - ty) < 2.0:
+                            is_just_completed = True
+                            break
+
+                if is_just_completed or is_currently_picking:
+                    # BIG glow signal to make task completion extremely clear
+                    glow = Circle((x, y), max(fp_w_base, fp_h_base)*0.8, facecolor='#FFD700',
+                                  edgecolor='red', linewidth=2, alpha=0.6, zorder=8)
                     self.ax_main.add_patch(glow)
                     self.agent_artists.append(glow)
+                    
+                    # Add a text label "PICK!"
+                    pick_text = self.ax_main.text(x, y + 0.5, "TASK!", ha='center', va='bottom',
+                                                fontweight='bold', fontsize=self.font_size+2,
+                                                color='yellow', bbox=dict(facecolor='red', alpha=0.7, boxstyle='round,pad=0.1'), zorder=9)
+                    self.agent_artists.append(pick_text)
 
-
-                # Persistent Waypoints: Small markers where tasks were done
+                # Task waypoint markers
                 for loc_id, t in robot_tasks:
                     if t <= timestep:
                         tx, ty = self.location_to_xy(loc_id)
-                        marker = Circle((tx, ty), self.robot_size * 0.3, 
-                                      facecolor=base_color, alpha=0.3, zorder=1)
+                        marker = Circle((tx, ty), self.robot_size * 0.3,
+                                        facecolor=base_color, alpha=0.3, zorder=1)
                         self.ax_main.add_patch(marker)
                         self.agent_artists.append(marker)
 
-                # Robot ID + Task Flow Counter
+                # Robot ID label
                 if self.show_robot_ids and self.font_size > 0:
-                    # Determine Task Type: In (to shelf) or Out (from shelf)
                     task_type = "..."
                     goal_loc_id = None
                     if agent_id in self.tasks_data:
@@ -494,34 +596,23 @@ class GeneralizedKivaVisualizer:
                             if t >= timestep:
                                 goal_loc_id = loc_id
                                 break
-                    
                     if goal_loc_id is not None:
-                        if goal_loc_id in self.shelf_corridors:
-                            task_type = "In" # Insource: to shelf
-                        else:
-                            task_type = "Out" # Outsource: from shelf
-                    
+                        task_type = "In" if goal_loc_id in self.shelf_corridors else "Out"
+
                     label = f"R{agent_id}:{task_type}"
                     if tasks_done > 0:
                         label += f" ({tasks_done})"
-                    
-                    text = self.ax_main.text(x, y + self.robot_size * 2.0, label, ha='center', va='bottom',
-                                           fontweight='bold', fontsize=self.font_size-1, 
-                                           color='white', bbox=dict(boxstyle="round,pad=0.2", facecolor='black', alpha=0.5))
+                    text = self.ax_main.text(
+                        x, y - 1.0, label, ha='center', va='top',
+                        fontweight='bold', fontsize=self.font_size - 1,
+                        color='white',
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  facecolor='black', alpha=0.5))
                     self.agent_artists.append(text)
 
-                # Trail
-                if timestep > 0 and self.trail_length > 0:
-                    trail_len = min(self.trail_length, timestep)
-                    if trail_len > 1:
-                        trail_points = [path[t] for t in range(max(0, timestep-trail_len), timestep+1)]
-                        trail_x, trail_y = zip(*trail_points)
-                        line, = self.ax_main.plot(trail_x, trail_y, color=base_color, 
-                                                 alpha=0.4, linewidth=1.2)
-                        self.trail_artists.append(line)
-                
                 # Status tracking
-                cell_type = self.map_data[y, x] if 0 <= y < self.grid_height and 0 <= x < self.grid_width else '?'
+                iy, ix = int(y), int(x)
+                cell_type = self.map_data[iy, ix] if 0 <= iy < self.grid_height and 0 <= ix < self.grid_width else '?'
                 if cell_type == 'e':
                     picking_count += 1
                     robot_status.append(f"R{agent_id}: At Endpoint ({tasks_done} total)")
@@ -531,13 +622,16 @@ class GeneralizedKivaVisualizer:
             else:
                 completed_count += 1
                 robot_status.append(f"R{agent_id}: FINISHED ({tasks_done} tasks)")
-        
+
         metrics = self.load_solver_metrics(timestep)
-        eff = total_tasks_completed/(timestep+1)
+        eff = total_tasks_completed / (timestep + 1)
         summary = f"Robots: {self.num_agents} | Tasks: {total_tasks_completed} | Throughput: {eff:.2f}/t"
         self.ax_main.set_title(summary, fontsize=16, fontweight='bold', color='darkblue', pad=30)
-        
-        return robot_status, {'active': active_count, 'picking': picking_count, 'completed': completed_count, 'total_tasks': total_tasks_completed, 'metrics': metrics}
+
+        return robot_status, {'active': active_count, 'picking': picking_count,
+                              'completed': completed_count,
+                              'total_tasks': total_tasks_completed,
+                              'metrics': metrics}
 
     def render_heatmap_mode(self, timestep):
         """Heatmap visualization for 500+ robots"""
@@ -638,11 +732,12 @@ Top 8 Robots:
 
     def animate(self, frame):
         """Generalized animation function"""
-        self.current_timestep = frame
-        robot_status, summary_stats = self.update_dynamic_elements(frame)
+        float_timestep = frame / float(self.frames_per_step)
+        self.current_timestep = float_timestep
+        robot_status, summary_stats = self.update_dynamic_elements(float_timestep)
         
         if self.use_info_panel:
-            self.update_info_panel(frame, robot_status, summary_stats)
+            self.update_info_panel(float_timestep, robot_status, summary_stats)
         
         return self.agent_artists + self.trail_artists
 
@@ -762,8 +857,9 @@ Top 8 Robots:
                             try:
                                 parts = pos.split(',')
                                 location_id = int(parts[0])
-                                timestep = int(parts[2])
-                                agent_data.append((location_id, timestep))
+                                orientation = int(parts[1]) if len(parts) > 1 else 0
+                                timestep = int(parts[2]) if len(parts) > 2 else int(parts[1])
+                                agent_data.append((location_id, timestep, orientation))
                             except:
                                 continue
                     
@@ -841,11 +937,11 @@ Top 8 Robots:
         
         for agent_id, agent_data in self.raw_data.items():
             agent_path = []
-            for location_id, timestep in agent_data:
+            for location_id, timestep, orientation in agent_data:
                 x, y = self.location_to_xy(location_id)
                 x = max(0, min(x, self.grid_width - 1))
                 y = max(0, min(y, self.grid_height - 1))
-                agent_path.append((x, y))
+                agent_path.append((x, y, orientation))
             
             solution['agents'][agent_id] = agent_path
         
@@ -871,8 +967,8 @@ Top 8 Robots:
             print("Close window to exit")
         
         anim = animation.FuncAnimation(
-            self.fig, self.animate, frames=self.max_timestep,
-            interval=self.animation_interval,
+        self.fig, self.animate, frames=self.max_timestep * self.frames_per_step,
+        interval=self.animation_interval // self.frames_per_step,
             blit=False,
             repeat=True,
             cache_frame_data=False
@@ -889,8 +985,9 @@ def main():
     parser.add_argument('--map', type=str, default='kiva.map')
     parser.add_argument('--result', type=str, default='my_results_paths.txt')
     parser.add_argument('--tasks', type=str, default=None)
-    parser.add_argument('--save', type=str, default=None, help='Save animation to file (e.g. animation.mp4)')
-    parser.add_argument('--footprint', type=int, default=3, help='Size of robot footprint (e.g. 3 for 3x3)')
+    parser.add_argument('--save', type=str, default=None, help='Save animation to file (e.g. animation.gif)')
+    parser.add_argument('--fp_width', type=int, default=3, help='Footprint width in cells (x-direction at theta=0)')
+    parser.add_argument('--fp_height', type=int, default=1, help='Footprint height in cells (y-direction at theta=0)')
     args = parser.parse_args()
 
     print("=" * 70)
@@ -900,7 +997,8 @@ def main():
     
     try:
         visualizer = GeneralizedKivaVisualizer(args.map, args.result, args.tasks)
-        visualizer.robot_footprint_size = args.footprint # Set the footprint size
+        visualizer.fp_width = args.fp_width
+        visualizer.fp_height = args.fp_height
         anim = visualizer.run(show=(args.save is None))
         if args.save:
             print(f"Saving animation to {args.save}...")

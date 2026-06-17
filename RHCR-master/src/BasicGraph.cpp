@@ -5,6 +5,7 @@
 #include <sstream>
 #include <random>
 #include <chrono>
+#include <unordered_set>
 
 
 void BasicGraph::print_map() const
@@ -31,9 +32,9 @@ int BasicGraph::get_rotate_degree(int dir1, int dir2) const
     if (dir1 == dir2)
         return 0;
     else if (abs(dir1 - dir2) == 1 || abs(dir1 - dir2) == 3)
-        return 1;
+        return 3; // 90 degree turn takes 3 timesteps
     else
-        return 2;
+        return 6; // 180 degree turn takes 6 timesteps
 }
 
 
@@ -50,6 +51,64 @@ list<int> BasicGraph::get_neighbors(int v) const
     return neighbors;
 }
 
+// Check if the full rotated footprint at (location, orientation) is free of obstacles.
+// Returns true if ALL footprint cells are within bounds and not obstacles.
+bool BasicGraph::isFootprintValidAtState(int location, int orientation) const
+{
+    // If footprint is just the default 1x1 point, skip the expensive check
+    if (active_footprint.offsets.size() <= 1)
+        return true;
+
+    int center_r = location / cols;
+    int center_c = location % cols;
+    Footprint rotated_fp = active_footprint.apply_rotation(std::max(0, orientation));
+    for (const auto& offset : rotated_fp.offsets)
+    {
+        int nr = center_r + offset.first;
+        int nc = center_c + offset.second;
+        if (nr < 0 || nr >= rows || nc < 0 || nc >= cols)
+            return false;  // out of bounds
+        
+        int cell = nr * cols + nc;
+        bool is_center = (offset.first == 0 && offset.second == 0);
+
+        if (is_center)
+        {
+            // Center is allowed anywhere EXCEPT solid obstacles
+            if (types[cell] == "Obstacle")
+                return false;
+        }
+        else
+        {
+            // The tail/body MUST stay strictly on travel corridors, home parking zones, AND endpoints.
+            // It cannot sweep over Obstacles (Racks).
+            if (types[cell] != "Travel" && types[cell] != "Home" && types[cell] != "Endpoint")
+                return false;
+        }
+    }
+    return true;
+}
+
+bool BasicGraph::isRotationValid(int location) const
+{
+    // Point agents don't sweep volume
+    if (active_footprint.offsets.size() <= 1)
+        return true;
+
+    auto swept = get_rotation_swept_volume(location, active_footprint);
+    for (int cell : swept)
+    {
+        // During a turn, NO part of the swept volume can hit an Obstacle (Rack).
+        // It must be entirely within Travel, Home, or Endpoint space.
+        if (cell == location)
+            continue;
+            
+        if (types[cell] != "Travel" && types[cell] != "Home" && types[cell] != "Endpoint")
+            return false;
+    }
+    return true;
+}
+
 list<State> BasicGraph::get_neighbors(const State& s) const
 {
     list<State> neighbors;
@@ -57,17 +116,29 @@ list<State> BasicGraph::get_neighbors(const State& s) const
         return neighbors;
     if (s.orientation >= 0)
     {
-        neighbors.push_back(State(s.location, s.timestep + 1, s.orientation)); // wait
+        // Wait: footprint doesn't change, always valid if current state is valid
+        neighbors.push_back(State(s.location, s.timestep + 1, s.orientation));
+
+        // Move forward: check destination footprint against obstacles
         if (weights[s.location][s.orientation] < WEIGHT_MAX - 1)
-            neighbors.push_back(State(s.location + move[s.orientation], s.timestep + 1, s.orientation)); // move
+        {
+            int next_loc = s.location + move[s.orientation];
+            if (isFootprintValidAtState(next_loc, s.orientation))
+                neighbors.push_back(State(next_loc, s.timestep + 1, s.orientation));
+        }
+
+        // Turn left / right: check rotated footprint at same location against obstacles
         int next_orientation1 = s.orientation + 1;
         int next_orientation2 = s.orientation - 1;
         if (next_orientation2 < 0)
             next_orientation2 += 4;
         else if (next_orientation1 > 3)
             next_orientation1 -= 4;
-        neighbors.push_back(State(s.location, s.timestep + 1, next_orientation1)); // turn left
-        neighbors.push_back(State(s.location, s.timestep + 1, next_orientation2)); // turn right
+
+        if (isFootprintValidAtState(s.location, next_orientation1))
+            neighbors.push_back(State(s.location, s.timestep + 1, next_orientation1));
+        if (isFootprintValidAtState(s.location, next_orientation2))
+            neighbors.push_back(State(s.location, s.timestep + 1, next_orientation2));
     }
     else
     {
@@ -247,7 +318,8 @@ std::vector<double> BasicGraph::compute_heuristics(int root_location)
 	}
 	nodes.clear();
 	heap.clear();
-    return res;
+    return res;cd C:\Users\DILEEP\MATLAB\Projects\untitled\BTP\MAPF-with-multi-level-architecture\RHCR-master
+    
 }
 
 
@@ -256,12 +328,13 @@ int BasicGraph::get_Manhattan_distance(int loc1, int loc2) const
     return abs(loc1 / cols - loc2 / cols) + abs(loc1 % cols - loc2 % cols);
 }
 
-std::vector<int> BasicGraph::get_footprint_locations(int center_loc, const Footprint& footprint) const
+std::vector<int> BasicGraph::get_footprint_locations(int center_loc, const Footprint& footprint, int theta) const
 {
     std::vector<int> locations;
     int r = center_loc / cols;
     int c = center_loc % cols;
-    for (auto offset : footprint.offsets)
+    Footprint rotated_fp = footprint.apply_rotation(theta);
+    for (auto offset : rotated_fp.offsets)
     {
         int next_r = r + offset.first;
         int next_c = c + offset.second;
@@ -272,6 +345,36 @@ std::vector<int> BasicGraph::get_footprint_locations(int center_loc, const Footp
     }
     return locations;
 }
+
+std::vector<int> BasicGraph::get_rotation_swept_volume(int center_loc, const Footprint& footprint) const
+{
+    std::unordered_set<int> swept_cells;
+    int r = center_loc / cols;
+    int c = center_loc % cols;
+    
+    // Simplest robust swept volume: circle swept by the furthest point.
+    double max_radius_sq = 0;
+    for (auto offset : footprint.offsets) {
+        double dist_sq = offset.first * offset.first + offset.second * offset.second;
+        if (dist_sq > max_radius_sq) max_radius_sq = dist_sq;
+    }
+    double max_radius = sqrt(max_radius_sq) + 0.5; // +0.5 to account for cell bounds
+    
+    int rad_ceil = ceil(max_radius);
+    for (int dr = -rad_ceil; dr <= rad_ceil; ++dr) {
+        for (int dc = -rad_ceil; dc <= rad_ceil; ++dc) {
+            if (dr * dr + dc * dc <= max_radius * max_radius) {
+                int next_r = r + dr;
+                int next_c = c + dc;
+                if (next_r >= 0 && next_r < rows && next_c >= 0 && next_c < cols) {
+                    swept_cells.insert(next_r * cols + next_c);
+                }
+            }
+        }
+    }
+    return std::vector<int>(swept_cells.begin(), swept_cells.end());
+}
+
 
 
 void BasicGraph::copy(const BasicGraph& copy)

@@ -1,0 +1,356 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath, amssymb}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning}
+
+\hypersetup{colorlinks=true, linkcolor=blue!70!black, citecolor=green!60!black, urlcolor=cyan!70!black}
+
+\lstset{
+    basicstyle=\ttfamily\small, keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray}, frame=single, breaklines=true,
+    numbers=left, numberstyle=\tiny\color{gray}, tabsize=4
+}
+
+\title{
+    \textbf{Multi-Agent Path Finding for Large-Footprint Warehouse Robots}\\[0.5em]
+    \large BTP Progress Report: Foundation, Current State, and Research Roadmap
+}
+\author{
+    Jayanth \& Team\\
+    \textit{Under the guidance of Prof.\ Sharad Sinha}\\
+    SRO Lab, IIT Indore
+}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%=========================================================================
+\section{Problem Statement}
+%=========================================================================
+
+In automated warehouses (e.g., Amazon Kiva), fleets of mobile robots navigate dense grids of shelving racks to pick and deliver goods. Coordinating $k$ robots so they reach goals without colliding is the \textbf{Multi-Agent Path Finding (MAPF)} problem.
+
+Nearly all existing MAPF solvers treat robots as \emph{point agents} occupying a single grid cell. This is physically unrealistic: real warehouse robots are rigid bodies spanning multiple cells. When such a robot rotates at an intersection, its body can sweep through adjacent shelves---a collision invisible to point-agent planners.
+
+\textbf{LA-MAPF} (Large-Agent MAPF) is the variant where agents have geometric extent. Li et al.\ (AAAI 2019) proved that LA-MAPF is \textbf{NP-hard}, even on simple grids---a fundamental complexity jump over standard MAPF. This means naive approaches (``just make the robot bigger'') are insufficient; we need \emph{algorithmically principled} solutions.
+
+\subsection{Our Long-Term Goal}
+
+Develop and evaluate a \textbf{publication-quality} LA-MAPF solver for lifelong warehouse settings, building on the existing RHCR codebase. The key research question:
+
+\begin{quote}
+\textit{How can we adapt multi-constraint conflict resolution (MC-CBS) to work within a rolling-horizon lifelong MAPF framework for heterogeneous large-footprint robots in realistic warehouse maps?}
+\end{quote}
+
+%=========================================================================
+\section{What the Seniors Built (Foundation)}
+\label{sec:seniors}
+%=========================================================================
+
+The senior batch developed a substantial, working MAPF framework. Their contributions form the \textbf{solid foundation} on which our research builds.
+
+\subsection{Core Simulation Engine (RHCR)}
+The codebase implements the Rolling-Horizon Collision Resolution framework from Li et al.\ (AAAI 2021). Key properties:
+\begin{itemize}
+    \item Decomposes the lifelong problem into windowed MAPF instances.
+    \item Re-plans every $h$ timesteps, resolving collisions within a bounded horizon $w$.
+    \item Supports continuous task streams (robots get new goals upon task completion).
+\end{itemize}
+
+\subsection{Multiple Solvers Integrated}
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Solver} & \textbf{Type} & \textbf{Status} \\
+\midrule
+PBS (Priority-Based Search) & High-level, priority ordering & Primary, working \\
+ECBS (Enhanced CBS) & High-level, bounded-suboptimal & Working but very slow \\
+WHCA* (Windowed HCA) & Cooperative A* with random ordering & Working (we fixed crash) \\
+LRA* (Local Repair A*) & Greedy local repair & Has pre-existing bugs \\
+SIPP (Safe Interval Path Planning) & Low-level single-agent & Working \\
+StateTimeA* & Low-level single-agent & Working \\
+\bottomrule
+\end{tabular}
+\caption{Solvers available in the codebase.}
+\end{table}
+
+\subsection{Capacity-Aware Scheduling}
+\begin{itemize}
+    \item \textbf{BundlePlanner}: Agents carry up to $N$ tasks simultaneously.
+    \item \textbf{ScholarScheduler (CFNRS)}: Builds a dependency graph among agents and uses DFS to detect deadlock cycles. When a cycle is found, one agent yields.
+    \item \textbf{DSS (Dynamic Safe Sequencing)}: Task reordering to reduce congestion.
+    \item \textbf{Insource/Outsource flow}: Alternates robot goals between home stations and shelf endpoints.
+\end{itemize}
+
+\subsection{Limitations of the Senior Work}
+\begin{enumerate}
+    \item \textbf{Point-robot assumption}: Every robot = 1 cell. No spatial extent.
+    \item \textbf{No rotation modeling}: Orientation had no physical consequence.
+    \item \textbf{Deadlocks}: Single-width corridors caused infinite wait-loops.
+    \item \textbf{Solver crashes}: WHCA* segfaults; LRA* crashed on empty paths.
+\end{enumerate}
+
+%=========================================================================
+\section{What We Have Done So Far}
+\label{sec:ours}
+%=========================================================================
+
+\textbf{Honest assessment}: Our work so far has been primarily \emph{engineering groundwork}---bug fixes, naive footprint expansion, map scaling, and visualization. This is necessary infrastructure, but it is \textbf{not yet a research contribution}. The algorithmic research (MC-CBS adaptation) is the next phase.
+
+\subsection{Bug Fixes and Stability}
+\begin{itemize}
+    \item Fixed WHCA* crash caused by uninitialized state vectors.
+    \item Fixed off-by-one errors in the simulation window logic.
+    \item Added comprehensive debug logging (\texttt{-d} flag).
+    \item Resolved the ``Drive X jump from ... to ...'' runtime assertion.
+\end{itemize}
+
+\subsection{Naive Footprint Expansion (Baseline, Not Research)}
+We introduced a \texttt{Footprint} class that stores a robot's body as relative cell offsets. This is a \emph{naive body expansion}---the simplest possible approach to large agents. It serves as a baseline for future comparison.
+
+\textbf{What we changed:}
+\begin{enumerate}
+    \item \texttt{Footprint.h}: Defines \texttt{Square(N)} and \texttt{Rectangle(W,H)} with \texttt{apply\_rotation($\theta$)}.
+    \item \texttt{PBS.cpp find\_conflicts()}: Uses \texttt{has\_footprint\_overlap()} instead of \texttt{loc1 == loc2}.
+    \item \texttt{ReservationTable.cpp}: Blocks all $N$ body cells in the constraint table.
+    \item \texttt{BasicGraph.cpp}: Validates every body cell against static obstacles.
+    \item \texttt{get\_neighbors()}: Checks footprint validity before adding successors.
+\end{enumerate}
+
+\subsection{What Is Still Broken (Known Gaps)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lp{8cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Problem} \\
+\midrule
+SIPP safe intervals & Queries center cell only; all $N$ body cells need checking \\
+StateTimeA* constraints & Center-only constraint check \\
+Heuristic tables & BFS assumes any cell reachable; inadmissible for large robots \\
+Initial placement & No overlap check for large footprints at start \\
+Post-hoc validation & Center-only collision check misses body overlaps \\
+\bottomrule
+\end{tabular}
+\caption{Known gaps in the current implementation.}
+\end{table}
+
+\subsection{Map Scaling (Workaround)}
+We wrote \texttt{scale\_map.py} to upscale maps $3\times$:
+$\texttt{kiva\_scaled\_3x.map}: 99 \times 138$, 3-cell-wide corridors.
+This provides physical clearance but is not an algorithmic solution.
+
+\subsection{Visualization Upgrades}
+Upgraded \texttt{mapf\_visualizer.py}: rigid-body rendering, smooth rotation, adaptive layout modes, real-time metrics dashboard.
+
+%=========================================================================
+\section{Explanation of the GIF/Video Results}
+\label{sec:gifs}
+%=========================================================================
+
+\subsection{Visual Legend}
+\begin{itemize}
+    \item \textbf{Dark brown} = Shelves (\texttt{@}). Robots must never overlap.
+    \item \textbf{Orange} = Endpoints (\texttt{e}). Task pick-up corridors.
+    \item \textbf{Light blue} = Home zones (\texttt{r}). Starting positions.
+    \item \textbf{White/gray} = Travel corridors (\texttt{.}). Free space.
+    \item \textbf{Colored rectangles} = Robot bodies (one color per robot).
+    \item \textbf{Faint trails} = Historical paths.
+    \item \textbf{Gold glow} = Currently picking a task.
+\end{itemize}
+
+\subsection{Before Map Scaling (Original Map) --- The Problem}
+
+\begin{description}
+    \item[\texttt{kpbs\_1x3\_simulation.gif}] $1\times3$ robot on the original $33\times46$ map. Corridors are 1 cell wide. The robot's body \textbf{clips through brown rack cells}---the center-only obstacle check allows this.
+
+    \item[\texttt{kpbs\_3x1\_simulation.gif}] $3\times1$ robot, same problem. When rotating at intersections, trailing cells sweep through shelves. \textbf{Clearest proof that point-robot planners fail for large agents.}
+\end{description}
+
+\subsection{After Map Scaling (3$\times$ Scaled) --- Current State}
+
+\begin{description}
+    \item[\texttt{kpbs\_3x1\_smooth.gif}] 5 robots, $3\times1$ body, scaled map. Robots move and rotate without clipping shelves. ``Smooth'' = continuous rotation interpolation.
+
+    \item[\texttt{kpbs\_3x1\_worm.gif}] Same scenario, ``worm'' mode: robot = chain of circles. Shows cell-level occupancy per timestep.
+
+    \item[\texttt{kpbs\_5x1\_smooth.gif}] $5\times1$ body. Planner succeeds but movement is more constrained---wider turns, longer waits.
+
+    \item[\texttt{kpbs\_5x1\_worm.gif}] Worm mode for $5\times1$. Shows the 5-cell chain following through turns.
+
+    \item[\texttt{kpbs\_7x1\_smooth.gif}] $7\times1$ body. Near the limit of the scaled map. Demonstrates graceful degradation.
+
+    \item[\texttt{kpbs\_9x1\_worm.gif}] $9\times1$ body. Severely constrained movement; robots wait often. Solver completes without errors.
+\end{description}
+
+\textbf{Caveat:} Static obstacle checking works for the full body. But \emph{dynamic} inter-agent collision checking (SIPP safe intervals) still only queries the center cell. Subtle agent-vs-agent body overlaps may occur.
+
+%=========================================================================
+\section{Simulation Results}
+%=========================================================================
+
+5 agents, 100 timesteps, PBS + SIPP, rotation on, \texttt{kiva\_scaled\_3x.map}:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Footprint} & \textbf{Tasks Done} & \textbf{Throughput} & \textbf{Exit} \\
+\midrule
+$1\times1$ (Point)   & 5  & 0.050 & 0 \\
+$3\times1$ (Small)   & 10 & 0.099 & 0 \\
+$5\times1$ (Medium)  & 5  & 0.050 & 0 \\
+$7\times1$ (Large)   & 5  & 0.050 & 0 \\
+$9\times1$ (XLarge)  & 5  & 0.050 & 0 \\
+$2\times3$ (Rect)    & 10 & 0.099 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{Preliminary results (naive approach + scaled map). These do not reflect true kinematic penalties due to partial dynamic checking.}
+\end{table}
+
+%=========================================================================
+\section{The Research Gap and Proposed Contribution}
+\label{sec:research}
+%=========================================================================
+
+\subsection{Why Current Work Is Not Publishable}
+\begin{enumerate}
+    \item Bug fixes = maintenance, not research.
+    \item Naive body expansion = a baseline, not an algorithm.
+    \item Map scaling = a workaround, not a solution.
+    \item Visualization = engineering, not research.
+\end{enumerate}
+
+\subsection{State of the Art in LA-MAPF}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}llp{5cm}p{4cm}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Paper} & \textbf{Key Idea} & \textbf{Gap} \\
+\midrule
+MC-CBS & Li+, AAAI 2019 & Multi-constraint branching for body conflicts & Not in RHCR/lifelong \\
+MC-CBS+Mutex & Zhang+, SoCS 2022 & Symmetry breaking on MC-CBS & Same \\
+MAPF-LNS2 & Li+, AAAI 2022 & Large neighborhood search, 8000+ agents & No LA-MAPF version \\
+LaCAM & Okumura, AAAI 2023 & Lazy joint-space search & Not for large agents \\
+MD-PIBT & MS Research, 2026 & Priority inheritance + kinodynamics & Very suboptimal \\
+\bottomrule
+\end{tabular}
+\caption{State-of-the-art and gaps our work can fill.}
+\end{table}
+
+\subsection{Proposed: MC-PBS for Lifelong LA-MAPF}
+
+\textbf{Core idea:} Adapt MC-CBS multi-constraint branching to PBS + RHCR. No paper combines all three.
+
+\textbf{Why it is publishable:}
+\begin{enumerate}
+    \item MC-CBS was for one-shot CBS. Adapting to PBS priority ordering requires new constraint rules.
+    \item RHCR adds rolling-horizon replanning. MC-CBS must handle partial plans from previous windows.
+    \item Kiva maps have structural regularity exploitable for faster constraint generation.
+    \item Comparison: Point vs.\ Naive vs.\ MC-PBS across sizes and agent counts.
+\end{enumerate}
+
+%=========================================================================
+\section{Implementation Roadmap}
+%=========================================================================
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}clcc@{}}
+\toprule
+\textbf{Phase} & \textbf{Task} & \textbf{Time} & \textbf{Status} \\
+\midrule
+\multicolumn{4}{l}{\textit{Phase 0: Engineering (Completed)}} \\
+0.1 & Codebase audit, crash fixes & -- & \checkmark \\
+0.2 & Footprint class + naive expansion & -- & \checkmark \\
+0.3 & Static obstacle validation & -- & \checkmark \\
+0.4 & Map scaling + visualization & -- & \checkmark \\
+0.5 & Preliminary benchmarks & -- & \checkmark \\
+\midrule
+\multicolumn{4}{l}{\textit{Phase 1: Low-Level Body Awareness (Next)}} \\
+1.1 & SIPP: safe intervals for all body cells & 3--4 days & Pending \\
+1.2 & Heuristic correction for large footprints & 2--3 days & Pending \\
+1.3 & Initial placement overlap prevention & 1 day & Pending \\
+\midrule
+\multicolumn{4}{l}{\textit{Phase 2: MC-PBS Algorithm (Research Core)}} \\
+2.1 & Body-conflict + swept-volume detection & 3--4 days & Planned \\
+2.2 & Multi-constraint branching in PBS & 5--7 days & Planned \\
+2.3 & Constraint selection strategies & 3--4 days & Planned \\
+2.4 & RHCR integration & 3--4 days & Planned \\
+\midrule
+\multicolumn{4}{l}{\textit{Phase 3: Evaluation \& Paper}} \\
+3.1 & Batch benchmarks (5--100 agents, multiple maps) & 2--3 days & Planned \\
+3.2 & Comparison: Point vs Naive vs MC-PBS & 2 days & Planned \\
+3.3 & Throughput degradation curves & 1 day & Planned \\
+3.4 & Paper draft & 5--7 days & Planned \\
+\bottomrule
+\end{tabular}
+\caption{Roadmap with honest status.}
+\end{table}
+
+%=========================================================================
+\section{Summary: Done vs Needed}
+%=========================================================================
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Item} & \textbf{Done?} & \textbf{Research Value} \\
+\midrule
+\multicolumn{3}{l}{\textit{Seniors' Foundation}} \\
+RHCR engine + PBS/ECBS/WHCA*/SIPP & \checkmark & High (framework) \\
+Capacity scheduling + deadlock detection & \checkmark & Medium \\
+\midrule
+\multicolumn{3}{l}{\textit{Our Engineering Work}} \\
+Bug fixes, crash resolution & \checkmark & Low \\
+Naive footprint expansion (baseline) & \checkmark & Low \\
+Static obstacle full-body check & \checkmark & Low \\
+Map scaling + visualization & \checkmark & Low \\
+Preliminary benchmarks & \checkmark & Low \\
+\midrule
+\multicolumn{3}{l}{\textit{Needed for Publication}} \\
+Low-level planner body awareness & $\times$ & Medium \\
+MC-PBS multi-constraint branching & $\times$ & \textbf{High} \\
+Swept-volume conflict detection & $\times$ & High \\
+RHCR + MC-PBS integration & $\times$ & High \\
+Rigorous benchmarks + comparison & $\times$ & High \\
+\bottomrule
+\end{tabular}
+\caption{Honest status: engineering is done, research is pending.}
+\end{table}
+
+%=========================================================================
+\section{References}
+%=========================================================================
+
+\begin{enumerate}
+    \item Li, J., et al.\ (2019). \emph{Multi-Agent Path Finding for Large Agents}. AAAI. [MC-CBS]
+    \item Li, J., et al.\ (2021). \emph{Lifelong MAPF in Large-Scale Warehouses}. AAAI. [RHCR]
+    \item Zhang, H., et al.\ (2022). \emph{Mutex Propagation in MAPF for Large Agents}. SoCS.
+    \item Li, J., et al.\ (2022). \emph{MAPF-LNS2}. AAAI.
+    \item Okumura, K.\ (2023). \emph{LaCAM}. AAAI.
+    \item Stern, R., et al.\ (2019). \emph{MAPF: Definitions, Variants, Benchmarks}. SoCS.
+\end{enumerate}
+
+\end{document}

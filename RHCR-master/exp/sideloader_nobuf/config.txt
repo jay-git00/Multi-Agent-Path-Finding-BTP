@@ -1,0 +1,12 @@
+map: maps/kiva_kinematic
+#drives: 10
+seed: 1781619680
+solver: PBS
+time_limit: 60
+simulation_window: 5
+planning_window: 10
+simulation_time: 200
+robust: 0
+rotate: 1
+use_dummy_paths: 0
+hold_endpoints: 0
